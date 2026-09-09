@@ -1,10 +1,17 @@
 const DEFAULT_BACKEND_URL = 'http://187.127.150.191:25567';
 
 module.exports = async function handler(request, response) {
-    const pathParts = Array.isArray(request.query.path)
-        ? request.query.path
-        : [request.query.path].filter(Boolean);
-    const apiPath = pathParts.join('/');
+    const queryPath = request.query?.path;
+    const pathParts = Array.isArray(queryPath) ? queryPath : [queryPath].filter(Boolean);
+    let apiPath = pathParts.join('/');
+
+    // Some Vercel static-output configurations invoke a catch-all function
+    // without populating req.query.path. Preserve the original /api/... URL as
+    // a reliable fallback.
+    if (!apiPath) {
+        const pathname = new URL(request.url || '/', 'https://dashboard.local').pathname;
+        apiPath = pathname.replace(/^\/api\//, '').replace(/^\/+|\/+$/g, '');
+    }
 
     if (!apiPath || !/^[A-Za-z0-9_~.%/-]+$/.test(apiPath)) {
         return response.status(400).json({ error: 'Invalid API path.' });
