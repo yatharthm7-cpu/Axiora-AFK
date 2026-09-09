@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>CraftControl</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <section id="loginView" class="login-shell">
+        <form id="loginForm" class="login-card">
+            <div class="brand-mark" aria-hidden="true">C</div>
+            <p class="eyebrow">MINECRAFT BOT MANAGER</p>
+            <h1>Welcome back.</h1>
+            <p class="muted">Enter the dashboard password shown in your hosting console.</p>
+            <label for="loginPassword">Dashboard password</label>
+            <input id="loginPassword" type="password" autocomplete="current-password" required autofocus>
+            <button class="primary full" type="submit">Open dashboard</button>
+            <p id="loginError" class="form-message error" role="alert"></p>
+        </form>
+    </section>
+
+    <main id="dashboardView" class="app-shell hidden">
+        <header class="topbar">
+            <div class="brand">
+                <div class="brand-mark small" aria-hidden="true">C</div>
+                <div>
+                    <span>CraftControl</span>
+                    <small>Bot operations</small>
+                </div>
+            </div>
+            <div class="top-actions">
+                <span id="discordState" class="service-state"><i></i> Discord</span>
+                <button id="refreshButton" class="icon-button" type="button" title="Refresh">↻</button>
+                <button id="logoutButton" class="ghost" type="button">Log out</button>
+            </div>
+        </header>
+
+        <section class="hero">
+            <div>
+                <p class="eyebrow">COMMAND CENTER</p>
+                <h1>Your bots, at a glance.</h1>
+                <p class="muted">Control Minecraft accounts here while keeping every Discord command available.</p>
+            </div>
+            <button id="showCreateButton" class="primary" type="button">+ Add bot</button>
+        </section>
+
+        <section class="summary-grid" aria-label="Dashboard summary">
+            <article class="summary-card">
+                <span>Managed bots</span>
+                <strong id="totalBots">0</strong>
+            </article>
+            <article class="summary-card online-accent">
+                <span>Online now</span>
+                <strong id="onlineBots">0</strong>
+            </article>
+            <article class="summary-card">
+                <span>Service uptime</span>
+                <strong id="uptime">0m</strong>
+            </article>
+            <article class="summary-card">
+                <span>Active macros</span>
+                <strong id="activeMacros">0</strong>
+            </article>
+        </section>
+
+        <section class="bots-section">
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">LIVE SESSIONS</p>
+                    <h2>Bot fleet</h2>
+                </div>
+                <span id="lastUpdated" class="muted"></span>
+            </div>
+            <div id="fleetToolbar" class="fleet-toolbar hidden">
+                <label class="selection-toggle"><input id="selectAllBots" type="checkbox"> Select all</label>
+                <strong id="selectedCount">0 selected</strong>
+                <select id="bulkAction" aria-label="Bulk action">
+                    <option value="reconnect">Reconnect</option>
+                    <option value="bonedrop-on">Enable Bone Drop</option>
+                    <option value="bonedrop-off">Disable Bone Drop</option>
+                    <option value="sell-on">Enable Sell Macro</option>
+                    <option value="sell-off">Disable Sell Macro</option>
+                    <option value="autoeat-on">Enable Auto-Eat</option>
+                    <option value="autoeat-off">Disable Auto-Eat</option>
+                </select>
+                <input id="bulkSeconds" type="number" min="1" max="86400" value="60" aria-label="Bulk action seconds">
+                <button id="runBulkAction" class="primary small-button" type="button">Apply</button>
+            </div>
+            <div id="botGrid" class="bot-grid"></div>
+            <div id="emptyState" class="empty-state hidden">
+                <div class="empty-icon">◇</div>
+                <h3>No bots yet</h3>
+                <p class="muted">Add your first Minecraft account to begin.</p>
+                <button class="primary create-trigger" type="button">Add a bot</button>
+            </div>
+        </section>
+    </main>
+
+    <dialog id="createDialog">
+        <form id="createForm" class="modal-card">
+            <div class="modal-heading">
+                <div>
+                    <p class="eyebrow">NEW CONNECTION</p>
+                    <h2>Add a bot</h2>
+                </div>
+                <button id="closeCreateButton" class="icon-button" type="button" aria-label="Close">×</button>
+            </div>
+            <div class="form-grid">
+                <label>Username
+                    <input name="username" maxlength="16" pattern="[A-Za-z0-9_]{1,16}" required placeholder="BotName">
+                </label>
+                <label>Minecraft server
+                    <input name="server" required placeholder="play.example.net:25565">
+                </label>
+                <label>Cracked-server password
+                    <input name="password" type="password" placeholder="Leave blank if unused">
+                </label>
+                <label>Authentication
+                    <select name="authType">
+                        <option value="offline">Offline / cracked</option>
+                        <option value="microsoft">Microsoft</option>
+                    </select>
+                </label>
+                <label class="span-two">SOCKS5 proxy <span class="optional">optional</span>
+                    <input name="proxy" placeholder="127.0.0.1:1080">
+                </label>
+            </div>
+            <p id="createError" class="form-message error" role="alert"></p>
+            <div class="modal-actions">
+                <button id="cancelCreateButton" class="ghost" type="button">Cancel</button>
+                <button class="primary" type="submit">Connect bot</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="controlDialog">
+        <div class="modal-card control-modal">
+            <div class="modal-heading">
+                <div>
+                    <p id="controlServer" class="eyebrow"></p>
+                    <h2 id="controlName">Bot controls</h2>
+                </div>
+                <button id="closeControlButton" class="icon-button" type="button" aria-label="Close">×</button>
+            </div>
+
+            <section class="control-section detail-stats">
+                <div><span>ONLINE</span><strong id="detailUptime">—</strong></div>
+                <div><span>CONNECTIONS</span><strong id="detailConnections">0</strong></div>
+                <div><span>DISCONNECTS</span><strong id="detailDisconnects">0</strong></div>
+                <div><span>DEATHS</span><strong id="detailDeaths">0</strong></div>
+                <div><span>DROP CLICKS</span><strong id="detailDropClicks">0</strong></div>
+            </section>
+
+            <section class="control-section">
+                <h3>Send to Minecraft</h3>
+                <form id="sendForm" class="inline-form">
+                    <input name="text" maxlength="256" required placeholder="/server lifesteal or a chat message">
+                    <button class="primary" type="submit">Send</button>
+                </form>
+            </section>
+
+            <section class="control-section macro-grid">
+                <article class="macro-card">
+                    <div><h3>Bone Drop</h3><p id="boneStatus" class="muted">Stopped</p></div>
+                    <label>Cooldown (seconds)<input id="boneSeconds" type="number" min="5" max="86400" value="60"></label>
+                    <div class="button-row">
+                        <button data-action="bonedrop-on" class="primary small-button" type="button">Enable</button>
+                        <button data-action="bonedrop-now" class="ghost small-button" type="button">Run now</button>
+                        <button data-action="bonedrop-off" class="danger-text small-button" type="button">Disable</button>
+                    </div>
+                </article>
+                <article class="macro-card">
+                    <div><h3>Sell Macro</h3><p id="sellStatus" class="muted">Stopped</p></div>
+                    <label>Interval (seconds)<input id="sellSeconds" type="number" min="1" max="86400" value="30"></label>
+                    <div class="button-row">
+                        <button data-action="sell-on" class="primary small-button" type="button">Enable</button>
+                        <button data-action="sell-off" class="danger-text small-button" type="button">Disable</button>
+                    </div>
+                </article>
+                <article class="macro-card compact-macro">
+                    <div><h3>Auto-Eat</h3><p id="eatStatus" class="muted">Stopped</p></div>
+                    <div class="button-row">
+                        <button data-action="autoeat-on" class="primary small-button" type="button">Enable</button>
+                        <button data-action="autoeat-off" class="danger-text small-button" type="button">Disable</button>
+                    </div>
+                </article>
+            </section>
+
+            <section class="control-section">
+                <div class="activity-heading">
+                    <h3>Inventory</h3>
+                    <span id="inventoryCount" class="muted"></span>
+                </div>
+                <div id="inventoryGrid" class="inventory-grid"></div>
+            </section>
+
+            <section class="control-section">
+                <div class="activity-heading"><h3>Recent activity</h3><span class="live-dot">LIVE</span></div>
+                <div id="activityLog" class="activity-log"></div>
+            </section>
+
+            <div class="modal-actions spread">
+                <button data-action="remove" class="danger" type="button">Remove bot</button>
+                <button data-action="reconnect" class="ghost" type="button">Reconnect</button>
+            </div>
+            <p id="controlMessage" class="form-message" role="status"></p>
+        </div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/app.js" defer></script>
+</body>
+</html>
