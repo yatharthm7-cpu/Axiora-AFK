@@ -195,17 +195,19 @@ function updateControlDialog() {
     document.querySelector('#sellStatus').textContent = bot.macros.sell ? 'Enabled' : 'Stopped';
     document.querySelector('#eatStatus').textContent = bot.macros.autoEat ? 'Enabled' : 'Stopped';
     document.querySelector('#boneSeconds').value = bot.macros.boneDropCooldown;
-    document.querySelector('#detailUptime').textContent = bot.state === 'online' ? formatUptime(bot.onlineSeconds) : '—';
-    document.querySelector('#detailConnections').textContent = bot.metrics.connections;
-    document.querySelector('#detailDisconnects').textContent = bot.metrics.disconnects;
-    document.querySelector('#detailDeaths').textContent = bot.metrics.deaths;
-    document.querySelector('#detailDropClicks').textContent = bot.metrics.boneDropClicks;
+    const metrics = bot.metrics || {};
+    document.querySelector('#detailUptime').textContent = bot.state === 'online' ? formatUptime(bot.onlineSeconds || 0) : '—';
+    document.querySelector('#detailConnections').textContent = metrics.connections || 0;
+    document.querySelector('#detailDisconnects').textContent = metrics.disconnects || 0;
+    document.querySelector('#detailDeaths').textContent = metrics.deaths || 0;
+    document.querySelector('#detailDropClicks').textContent = metrics.boneDropClicks || 0;
 
     const inventory = document.querySelector('#inventoryGrid');
-    const totalItems = bot.inventory.reduce((total, item) => total + item.count, 0);
+    const inventoryItems = bot.inventory || [];
+    const totalItems = inventoryItems.reduce((total, item) => total + item.count, 0);
     document.querySelector('#inventoryCount').textContent = `${totalItems} item${totalItems === 1 ? '' : 's'}`;
-    inventory.innerHTML = bot.inventory.length
-        ? bot.inventory.map(item => `
+    inventory.innerHTML = inventoryItems.length
+        ? inventoryItems.map(item => `
             <div class="inventory-item">
                 <div class="item-icon">${escapeHtml(item.name.slice(0, 2).toUpperCase())}</div>
                 <div class="item-info"><strong>${escapeHtml(item.displayName)}</strong><span>× ${item.count}</span></div>
