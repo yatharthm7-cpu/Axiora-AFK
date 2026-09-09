@@ -2325,19 +2325,9 @@ function startDashboardServer() {
     return server;
 }
 
-// Some Pterodactyl Node eggs launch JavaScript through `ts-node --esm`.
-// In that mode `require.main` may not point at this module even though this is
-// the selected startup file, so also compare the actual process entry path.
-const launchedAsEntryPoint = require.main === module || (
-    process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename)
-);
-
-if (launchedAsEntryPoint) {
+if (require.main === module) {
     startDashboardServer();
-    discordClient.login(process.env.DISCORD_TOKEN).catch(error => {
-        console.error(`Discord login failed: ${error.message}`);
-        process.exitCode = 1;
-    });
+    discordClient.login(process.env.DISCORD_TOKEN);
 }
 
 module.exports = {
