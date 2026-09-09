@@ -9,10 +9,8 @@ const {
     normalizeBoneDropIntervalSeconds,
     normalizeJoinCommand,
     normalizeMinecraftVersion,
-    normalizeProxy,
     optionalValue,
-    parseAddress,
-    publicProxy
+    parseAddress
 } = require('../index');
 
 test('server addresses support domains, custom ports, IPv4, and bracketed IPv6', () => {
@@ -29,23 +27,6 @@ test('server addresses support domains, custom ports, IPv4, and bracketed IPv6',
         host: '2001:db8::10', port: 25567, explicitPort: true
     });
     assert.throws(() => parseAddress('play.example.com:70000', 25565), /between 1 and 65535/);
-});
-
-test('dashboard-safe proxy details never include the proxy password', () => {
-    const privateProxy = normalizeProxy({
-        host: 'proxy.example.com', port: 1080, username: 'agent', password: 'top-secret'
-    });
-    assert.equal(privateProxy.password, 'top-secret');
-    assert.deepEqual(publicProxy(privateProxy), {
-        enabled: true,
-        host: 'proxy.example.com',
-        port: 1080,
-        address: 'proxy.example.com:1080',
-        username: 'agent'
-    });
-    assert.equal(JSON.stringify(publicProxy(privateProxy)).includes('top-secret'), false);
-    assert.throws(() => normalizeProxy('proxy.example.com'), /must include a port/);
-    assert.equal(normalizeProxy('[2001:db8::20]:1080').host, '2001:db8::20');
 });
 
 test('automatic and fixed Minecraft version settings are normalized', () => {

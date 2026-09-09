@@ -8,20 +8,18 @@ A multi-account AFK bot for supported Minecraft Java servers, controlled through
 *   **Multi-Account Support:** Spawns isolated, secure Discord text channels for each active bot.
 *   **Auto-Authentication:** Automatically detects login prompts and handles `/register` or `/login` commands (AuthMe support).
 *   **Multi-Version Connections:** Automatically detects supported Minecraft Java versions (currently 1.8.8 through 1.21.11), with an optional fixed-version override.
-*   **SOCKS5 Proxies:** Supports a different optional authenticated SOCKS5 proxy for each Minecraft account.
+*   **Optional Network Navigation:** Saves a different post-login command for each bot instead of forcing a specific hub or game mode.
 *   **Custom Anti-AFK:** Periodically shifts camera angles, sneaks, and swings arms to mimic real player behavior.
 *   **Auto-Reconnect:** Gracefully handles unexpected server kicks or Wi-Fi drops and automatically reconnects when the network is restored.
 *   **Skeleton Bone Drop:** Keeps the loot menu open, repeatedly uses Drop Loot as the menu refreshes, then clicks Sell All once when arrows appear. Its cooldown is configurable per bot.
 *   **Per-Account Scheduling:** Gives every account its own active hours, Bone Drop times, Sell Macro window, maintenance pause, and high-ping reconnect rule.
-*   **Secure Operations:** Admin/viewer accounts, expiring signed sessions, confirmations, Emergency Stop, audit history, and secret-free settings backups.
-*   **Historical Statistics:** Daily/weekly observed uptime, ping charts, reconnect totals, Bone Drop success, estimated earnings, memory, and CPU.
 
 ---
 
 ## 📋 Prerequisites
 
 Before you begin, ensure you have the following installed on your system:
-*   [Node.js](https://nodejs.org/) (v18 or higher)
+*   [Node.js](https://nodejs.org/) (v16.14 or higher)
 *   A Discord Bot Token (Created via the [Discord Developer Portal](https://discord.com/developers/applications))
 
 ---
@@ -45,14 +43,6 @@ Create a file named .env in the root directory of your project and add your Disc
 DISCORD_TOKEN=your_discord_bot_token_here
 DASHBOARD_PASSWORD=use-a-long-unique-password
 DASHBOARD_PORT=25567
-DASHBOARD_SESSION_HOURS=8
-DASHBOARD_SESSION_SECRET=use-another-long-random-secret
-```
-
-The single-user login name is `admin`. For separate administrator and viewer accounts, add `DASHBOARD_USERS` as one-line JSON. It replaces the single password login:
-
-```env
-DASHBOARD_USERS=[{"username":"admin","password":"change-me","role":"admin"},{"username":"viewer","password":"change-me-too","role":"viewer"}]
 ```
 
 On hosts that provide `SERVER_PORT` or `PORT` automatically, that assigned port is used for the dashboard. The server listens on all network interfaces by default.
@@ -74,9 +64,9 @@ After the app starts, open:
 http://187.127.150.191:25567
 ```
 
-Sign in as `admin` with `DASHBOARD_PASSWORD`, or use an account from `DASHBOARD_USERS`. From the dashboard you can:
+Sign in with `DASHBOARD_PASSWORD`. From the dashboard you can:
 
-* Add offline/cracked or Microsoft-authenticated accounts with automatic or fixed version selection and an optional SOCKS5 proxy.
+* Add offline/cracked or Microsoft-authenticated accounts.
 * View connection status, health, hunger, position, active macros, and recent activity.
 * Watch activity update live and inspect each account's current inventory.
 * Select multiple bots and apply reconnect or macro controls to the whole group.
@@ -85,12 +75,8 @@ Sign in as `admin` with `DASHBOARD_PASSWORD`, or use an account from `DASHBOARD_
 * Enable or disable Bone Drop, Sell Macro, and Auto-Eat.
 * Run Bone Drop immediately, reconnect a bot, or remove its saved session.
 * Configure separate schedules for every account and see the next scheduled action.
-* View ping history, observed uptime, macro success, estimated earnings, process memory, and CPU usage.
-* Export/import non-secret settings, review the audit log, and activate a protected Emergency Stop.
 
 If `DASHBOARD_PASSWORD` is missing, the app creates a temporary password and prints it in the hosting console. It changes after every restart, so setting the environment variable is recommended. Because the provided address uses plain HTTP, use a unique dashboard password that you do not use anywhere else. HTTPS through a domain or secure tunnel is recommended for access over the public internet.
-
-Administrators can change bots and download backups. Viewers can inspect status, statistics, inventory, logs, and audit history but cannot perform actions. Inactive dashboard sessions expire after `DASHBOARD_SESSION_HOURS`; background status polling does not extend them. Settings exports never contain Minecraft or proxy passwords. Import updates matching saved accounts and leaves their passwords untouched.
 
 ## 🎮 Discord Controls
 
@@ -101,7 +87,7 @@ Once the bot is running, you control it entirely through Discord.
 Type the following command in any channel your Discord bot can read:
 
 ```text
-/spawn <username> <server[:port]> <password|-> [offline|microsoft] [proxy:port|-] [version|auto]
+/spawn <username> <server[:port]> <password|-> [offline|microsoft]
 ```
 
 username: The Minecraft username for the bot.
@@ -112,16 +98,12 @@ password: The cracked-server password. Use `-` if that server has no `/login` pl
 
 auth: Use `offline` for cracked servers or `microsoft` for premium accounts. The default is `offline`.
 
-proxy: Optional SOCKS5 proxy. Use `-` for a direct connection. Dashboard-created accounts can also use proxy usernames and passwords.
-
-version: Optional fixed version such as `1.20.4`. Use `auto` or omit it to detect the server version.
-
 Example:
 
 ```text
 /spawn IAMCRAFTY1 play.example.com MySecretPass offline
-/spawn IAMCRAFTY2 play.example.com:25566 MySecretPass offline 203.0.113.10:1080 auto
-/spawn PremiumName play.example.com - microsoft - auto
+/spawn IAMCRAFTY2 play.example.com:25566 MySecretPass offline
+/spawn PremiumName play.example.com - microsoft
 ```
 
 The bot will automatically create a private Discord channel named #bot-iamcrafty1 where it will stream the game chat and events.

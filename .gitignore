@@ -1,6 +1,5 @@
 node_modules/
 .env
 sessions.json
-audit-log.json
 *.log
 npm-debug.log*

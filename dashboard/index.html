@@ -16,9 +16,7 @@
             <div class="brand-mark" aria-hidden="true">C</div>
             <p class="eyebrow">MINECRAFT BOT MANAGER</p>
             <h1>Welcome back.</h1>
-            <p class="muted">Sign in with your CraftControl account.</p>
-            <label for="loginUsername">Username</label>
-            <input id="loginUsername" autocomplete="username" value="admin" required>
+            <p class="muted">Enter the dashboard password shown in your hosting console.</p>
             <label for="loginPassword">Dashboard password</label>
             <input id="loginPassword" type="password" autocomplete="current-password" required autofocus>
             <button class="primary full" type="submit">Open dashboard</button>
@@ -36,7 +34,6 @@
                 </div>
             </div>
             <div class="top-actions">
-                <span id="currentUser" class="user-pill"></span>
                 <span id="discordState" class="service-state"><i></i> Discord</span>
                 <button id="refreshButton" class="icon-button" type="button" title="Refresh">↻</button>
                 <button id="logoutButton" class="ghost" type="button">Log out</button>
@@ -49,13 +46,7 @@
                 <h1>Your bots, at a glance.</h1>
                 <p class="muted">Control Minecraft accounts here while keeping every Discord command available.</p>
             </div>
-            <div class="hero-actions admin-only">
-                <input id="importFile" type="file" accept="application/json,.json" class="hidden">
-                <button id="importButton" class="ghost" type="button">Import</button>
-                <button id="exportButton" class="ghost" type="button">Export</button>
-                <button id="emergencyButton" class="danger" type="button">Emergency stop</button>
-                <button id="showCreateButton" class="primary" type="button">+ Add bot</button>
-            </div>
+            <button id="showCreateButton" class="primary" type="button">+ Add bot</button>
         </section>
 
         <section class="summary-grid" aria-label="Dashboard summary">
@@ -75,14 +66,6 @@
                 <span>Active macros</span>
                 <strong id="activeMacros">0</strong>
             </article>
-            <article class="summary-card">
-                <span>Memory</span>
-                <strong id="memoryUsage">0 MB</strong>
-            </article>
-            <article class="summary-card">
-                <span>Process CPU</span>
-                <strong id="cpuUsage">0%</strong>
-            </article>
         </section>
 
         <section class="bots-section">
@@ -93,11 +76,10 @@
                 </div>
                 <span id="lastUpdated" class="muted"></span>
             </div>
-            <div id="fleetToolbar" class="fleet-toolbar admin-only hidden">
+            <div id="fleetToolbar" class="fleet-toolbar hidden">
                 <label class="selection-toggle"><input id="selectAllBots" type="checkbox"> Select all</label>
                 <strong id="selectedCount">0 selected</strong>
                 <select id="bulkAction" aria-label="Bulk action">
-                    <option value="stop">Stop selected</option>
                     <option value="reconnect">Reconnect</option>
                     <option value="bonedrop-on">Enable Bone Drop</option>
                     <option value="bonedrop-off">Disable Bone Drop</option>
@@ -114,16 +96,8 @@
                 <div class="empty-icon">◇</div>
                 <h3>No bots yet</h3>
                 <p class="muted">Add your first Minecraft account to begin.</p>
-                <button class="primary create-trigger admin-only" type="button">Add a bot</button>
+                <button class="primary create-trigger" type="button">Add a bot</button>
             </div>
-        </section>
-
-        <section class="audit-section">
-            <div class="section-heading">
-                <div><p class="eyebrow">SECURITY</p><h2>Audit activity</h2></div>
-                <button id="refreshAuditButton" class="ghost" type="button">Refresh</button>
-            </div>
-            <div id="auditLog" class="audit-log"><p class="muted">No audit activity yet.</p></div>
         </section>
     </main>
 
@@ -152,21 +126,6 @@
                         <option value="microsoft">Microsoft</option>
                     </select>
                 </label>
-                <label>Minecraft version
-                    <input name="version" value="auto" placeholder="auto or 1.21.1">
-                </label>
-                <label>SOCKS5 proxy host <span class="optional">optional</span>
-                    <input name="proxyHost" placeholder="proxy.example.com">
-                </label>
-                <label>Proxy port <span class="optional">optional</span>
-                    <input name="proxyPort" type="number" min="1" max="65535" placeholder="1080">
-                </label>
-                <label>Proxy username <span class="optional">optional</span>
-                    <input name="proxyUsername" autocomplete="off">
-                </label>
-                <label>Proxy password <span class="optional">optional</span>
-                    <input name="proxyPassword" type="password" autocomplete="new-password">
-                </label>
             </div>
             <p id="createError" class="form-message error" role="alert"></p>
             <div class="modal-actions">
@@ -188,38 +147,13 @@
 
             <section class="control-section detail-stats">
                 <div><span>ONLINE</span><strong id="detailUptime">—</strong></div>
-                <div><span>PING</span><strong id="detailPing">—</strong></div>
-                <div><span>UPTIME 24H</span><strong id="detailUptimeDay">—</strong></div>
-                <div><span>UPTIME 7D</span><strong id="detailUptimeWeek">—</strong></div>
                 <div><span>CONNECTIONS</span><strong id="detailConnections">0</strong></div>
                 <div><span>DISCONNECTS</span><strong id="detailDisconnects">0</strong></div>
                 <div><span>DEATHS</span><strong id="detailDeaths">0</strong></div>
                 <div><span>DROP CLICKS</span><strong id="detailDropClicks">0</strong></div>
-                <div><span>DROP SUCCESS</span><strong id="detailDropSuccess">—</strong></div>
-                <div><span>EST. EARNINGS</span><strong id="detailEarnings">0</strong></div>
             </section>
 
             <section class="control-section">
-                <div class="activity-heading"><h3>Ping history</h3><span id="pingRange" class="muted"></span></div>
-                <svg id="pingChart" class="ping-chart" viewBox="0 0 600 130" preserveAspectRatio="none" aria-label="Recent ping chart"></svg>
-            </section>
-
-            <section class="control-section admin-only">
-                <form id="connectionForm">
-                    <div class="activity-heading"><h3>Connection settings</h3><span id="detectedVersion" class="muted"></span></div>
-                    <div class="form-grid compact-grid">
-                        <label>Minecraft version<input id="connectionVersion" value="auto" placeholder="auto or 1.21.1"></label>
-                        <label class="rule-toggle"><input id="connectionProxyEnabled" type="checkbox"> Use SOCKS5 proxy</label>
-                        <label>Proxy host<input id="connectionProxyHost" placeholder="proxy.example.com"></label>
-                        <label>Proxy port<input id="connectionProxyPort" type="number" min="1" max="65535" placeholder="1080"></label>
-                        <label>Proxy username<input id="connectionProxyUsername" autocomplete="off"></label>
-                        <label>New proxy password<input id="connectionProxyPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label>
-                    </div>
-                    <div class="schedule-actions"><button class="primary" type="submit">Save and reconnect</button></div>
-                </form>
-            </section>
-
-            <section class="control-section admin-only">
                 <h3>Send to Minecraft</h3>
                 <form id="sendForm" class="inline-form">
                     <input name="text" maxlength="256" required placeholder="/server lifesteal or a chat message">
@@ -227,7 +161,7 @@
                 </form>
             </section>
 
-            <section class="control-section macro-grid admin-only">
+            <section class="control-section macro-grid">
                 <article class="macro-card">
                     <div><h3>Bone Drop</h3><p id="boneStatus" class="muted">Stopped</p></div>
                     <label>Cooldown (seconds)<input id="boneSeconds" type="number" min="5" max="86400" value="60"></label>
@@ -254,7 +188,7 @@
                 </article>
             </section>
 
-            <section class="control-section schedule-panel admin-only">
+            <section class="control-section schedule-panel">
                 <form id="scheduleForm">
                     <div class="schedule-title">
                         <div>
@@ -339,9 +273,8 @@
                 <div id="activityLog" class="activity-log"></div>
             </section>
 
-            <div class="modal-actions spread admin-only">
+            <div class="modal-actions spread">
                 <button data-action="remove" class="danger" type="button">Remove bot</button>
-                <button data-action="stop" class="danger-text" type="button">Stop</button>
                 <button data-action="reconnect" class="ghost" type="button">Reconnect</button>
             </div>
             <p id="controlMessage" class="form-message" role="status"></p>

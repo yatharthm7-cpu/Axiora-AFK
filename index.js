@@ -3,7 +3,6 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
-const { SocksClient } = require('socks');
 const mineflayer = require('mineflayer');
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
 
@@ -19,81 +18,18 @@ const discordClient = new Client({
 const botSessions = new Map(); 
 const reconnectInterval = 5000;
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
-const AUDIT_LOG_FILE = path.join(__dirname, 'audit-log.json');
 const DASHBOARD_PUBLIC_DIR = path.join(__dirname, 'dashboard');
 const CENTRAL_LOG_CHANNEL = '1535252592198680607';
 const DASHBOARD_HOST = process.env.DASHBOARD_HOST || '0.0.0.0';
 const DASHBOARD_PORT = Number.parseInt(process.env.PORT || process.env.SERVER_PORT || process.env.DASHBOARD_PORT || '25567', 10);
 const generatedDashboardPassword = crypto.randomBytes(12).toString('base64url');
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || generatedDashboardPassword;
-const DASHBOARD_SESSION_HOURS = Math.min(168, Math.max(1, Number.parseInt(process.env.DASHBOARD_SESSION_HOURS || '8', 10) || 8));
+const dashboardCookieSecret = crypto.createHash('sha256').update(`${DASHBOARD_PASSWORD}:${crypto.randomBytes(32).toString('hex')}`).digest();
 const dashboardLogs = new Map();
 const dashboardEventClients = new Set();
-const auditLog = [];
-const pendingDiscordSpawns = new Set();
 const DEFAULT_BONE_DROP_INTERVAL_SECONDS = 60;
 const MIN_BONE_DROP_INTERVAL_SECONDS = 5;
 const MAX_BONE_DROP_INTERVAL_SECONDS = 86400;
-
-function loadDashboardUsers() {
-    let entries = [];
-    if (process.env.DASHBOARD_USERS) {
-        try {
-            const parsed = JSON.parse(process.env.DASHBOARD_USERS);
-            if (!Array.isArray(parsed)) throw new Error('DASHBOARD_USERS must be a JSON array.');
-            entries = parsed;
-        } catch (error) {
-            console.error(`Invalid DASHBOARD_USERS: ${error.message}`);
-        }
-    }
-    if (!entries.length) entries = [{ username: 'admin', password: DASHBOARD_PASSWORD, role: 'admin' }];
-
-    const users = new Map();
-    for (const entry of entries) {
-        const username = String(entry?.username || '').trim().toLowerCase();
-        const password = String(entry?.password || '');
-        const role = entry?.role === 'viewer' ? 'viewer' : 'admin';
-        if (!/^[a-z0-9_.-]{1,32}$/.test(username) || !password) continue;
-        users.set(username, { username, password, role });
-    }
-    if (!users.size) users.set('admin', { username: 'admin', password: DASHBOARD_PASSWORD, role: 'admin' });
-    return users;
-}
-
-const dashboardUsers = loadDashboardUsers();
-const dashboardCookieSecret = crypto.createHash('sha256').update(
-    process.env.DASHBOARD_SESSION_SECRET ||
-    JSON.stringify([...dashboardUsers.values()].map(user => [user.username, user.password, user.role]))
-).digest();
-
-function loadAuditLog() {
-    try {
-        if (!fs.existsSync(AUDIT_LOG_FILE)) return;
-        const saved = JSON.parse(fs.readFileSync(AUDIT_LOG_FILE, 'utf8'));
-        if (Array.isArray(saved)) auditLog.push(...saved.slice(-1000));
-    } catch (error) {
-        console.error(`Could not load audit log: ${error.message}`);
-    }
-}
-
-function saveAuditLog() {
-    try { fs.writeFileSync(AUDIT_LOG_FILE, JSON.stringify(auditLog.slice(-1000), null, 2)); } catch (error) {}
-}
-
-function recordAudit(actor, action, target = null, details = null) {
-    auditLog.push({
-        time: new Date().toISOString(),
-        actor: actor?.username || String(actor || 'system'),
-        role: actor?.role || (String(actor || '').startsWith('discord:') ? 'discord' : 'system'),
-        action,
-        target,
-        details
-    });
-    if (auditLog.length > 1000) auditLog.splice(0, auditLog.length - 1000);
-    saveAuditLog();
-}
-
-loadAuditLog();
 
 function stripDiscordFormatting(value) {
     return String(value ?? '')
@@ -125,82 +61,11 @@ function normalizeSessionMetrics(value = {}) {
         disconnects: Number.isInteger(value.disconnects) ? value.disconnects : 0,
         deaths: Number.isInteger(value.deaths) ? value.deaths : 0,
         boneDropRuns: Number.isInteger(value.boneDropRuns) ? value.boneDropRuns : 0,
-        boneDropSuccesses: Number.isInteger(value.boneDropSuccesses) ? value.boneDropSuccesses : 0,
-        boneDropFailures: Number.isInteger(value.boneDropFailures) ? value.boneDropFailures : 0,
-        boneDropEmpty: Number.isInteger(value.boneDropEmpty) ? value.boneDropEmpty : 0,
         boneDropClicks: Number.isInteger(value.boneDropClicks) ? value.boneDropClicks : 0,
         sellAllClicks: Number.isInteger(value.sellAllClicks) ? value.sellAllClicks : 0,
         dashboardActions: Number.isInteger(value.dashboardActions) ? value.dashboardActions : 0,
-        estimatedEarnings: Number.isFinite(value.estimatedEarnings) ? value.estimatedEarnings : 0,
         lastOnlineAt: value.lastOnlineAt || null
     };
-}
-
-function normalizeAnalytics(value = {}) {
-    const samples = Array.isArray(value.samples) ? value.samples
-        .filter(sample => sample && Number.isFinite(sample.time))
-        .slice(-10080)
-        .map(sample => ({
-            time: sample.time,
-            online: Boolean(sample.online),
-            ping: Number.isFinite(sample.ping) ? Math.round(sample.ping) : null
-        })) : [];
-    return {
-        samples,
-        lastBalance: Number.isFinite(value.lastBalance) ? value.lastBalance : null,
-        lastDirectEarningAt: Number.isFinite(value.lastDirectEarningAt) ? value.lastDirectEarningAt : 0,
-        lastDirectEarningAmount: Number.isFinite(value.lastDirectEarningAmount) ? value.lastDirectEarningAmount : 0
-    };
-}
-
-function ensureSessionAnalytics(session) {
-    session.analytics = normalizeAnalytics(session.analytics);
-    return session.analytics;
-}
-
-function availabilityPercentage(session, hours) {
-    const since = Date.now() - hours * 3600000;
-    const samples = ensureSessionAnalytics(session).samples.filter(sample => sample.time >= since);
-    if (!samples.length) return session.bot?.entity && session.bot.isAlive ? 100 : 0;
-    return Math.round(samples.filter(sample => sample.online).length / samples.length * 1000) / 10;
-}
-
-function parseEconomyAmount(value) {
-    const normalized = String(value || '').replace(/,/g, '');
-    const match = normalized.match(/(?:[$€£₹]\s*)?(\d+(?:\.\d+)?)\s*([kmbt])?/i);
-    if (!match) return null;
-    const multipliers = { k: 1e3, m: 1e6, b: 1e9, t: 1e12 };
-    return Number(match[1]) * (multipliers[(match[2] || '').toLowerCase()] || 1);
-}
-
-function recordEconomyMessage(session, message) {
-    const plain = stripDiscordFormatting(message);
-    const lower = plain.toLowerCase();
-    const analytics = ensureSessionAnalytics(session);
-    const metrics = ensureSessionMetrics(session);
-    const balanceText = plain.match(/(?:balance|bal)[^\d$€£₹-]*([$€£₹]?\s*[\d,.]+\s*[kmbt]?)/i)?.[1];
-
-    if (balanceText) {
-        const balance = parseEconomyAmount(balanceText);
-        if (Number.isFinite(balance)) {
-            const increase = Number.isFinite(analytics.lastBalance) ? balance - analytics.lastBalance : 0;
-            const recentlyCounted = Date.now() - analytics.lastDirectEarningAt < 30000 &&
-                Math.abs(increase - analytics.lastDirectEarningAmount) <= Math.max(1, increase * 0.02);
-            if (increase > 0 && !recentlyCounted) metrics.estimatedEarnings += increase;
-            analytics.lastBalance = balance;
-        }
-        return;
-    }
-
-    if (lower.includes('sold') || lower.includes('earned')) {
-        const earningText = plain.match(/(?:sold.*?(?:for)?|earned)\s*[:+-]?\s*([$€£₹]?\s*[\d,.]+\s*[kmbt]?)/i)?.[1];
-        const earning = parseEconomyAmount(earningText);
-        if (Number.isFinite(earning) && earning > 0) {
-            metrics.estimatedEarnings += earning;
-            analytics.lastDirectEarningAt = Date.now();
-            analytics.lastDirectEarningAmount = earning;
-        }
-    }
 }
 
 function ensureSessionMetrics(session) {
@@ -212,8 +77,6 @@ function recordBoneDropResult(session, result) {
     const metrics = ensureSessionMetrics(session);
     metrics.boneDropRuns++;
     metrics.boneDropClicks += result.dropActions || 0;
-    if (result.dropActions === 0 && !result.soldAll) metrics.boneDropEmpty++;
-    else metrics.boneDropSuccesses++;
     if (result.soldAll) metrics.sellAllClicks++;
     saveSessions();
 }
@@ -239,104 +102,6 @@ function normalizeBoneDropIntervalSeconds(value) {
         throw new Error(`Bone Drop cooldown must be a whole number from ${MIN_BONE_DROP_INTERVAL_SECONDS} to ${MAX_BONE_DROP_INTERVAL_SECONDS} seconds.`);
     }
     return seconds;
-}
-
-function normalizeProxy(value = {}) {
-    if (typeof value === 'string') {
-        const address = optionalValue(value);
-        if (!address) return null;
-        const parsed = parseAddress(address, 1080);
-        if (!parsed.explicitPort) throw new Error('Proxy address must include a port, for example proxy.example.com:1080.');
-        value = parsed;
-    }
-    const host = String(value?.host || '').trim().replace(/^\[|\]$/g, '');
-    const port = Number.parseInt(value?.port, 10);
-    if (!host) return null;
-    if (host.length > 255 || /\s/.test(host) || !Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error('Proxy must contain a valid host and port.');
-    }
-    return {
-        host,
-        port,
-        username: String(value?.username || '').slice(0, 128),
-        password: String(value?.password || '').slice(0, 256)
-    };
-}
-
-function optionalValue(value) {
-    const normalized = String(value ?? '').trim();
-    return !normalized || ['-', 'none', 'null'].includes(normalized.toLowerCase()) ? null : normalized;
-}
-
-function parseAddress(value, defaultPort = 25565) {
-    const address = String(value || '').trim();
-    if (!address) throw new Error('A server address is required.');
-    let host = address;
-    let port = defaultPort;
-    let explicitPort = false;
-    const bracketed = address.match(/^\[([^\]]+)](?::(\d+))?$/);
-    if (bracketed) {
-        host = bracketed[1];
-        if (bracketed[2]) {
-            port = Number(bracketed[2]);
-            explicitPort = true;
-        }
-    } else if ((address.match(/:/g) || []).length === 1) {
-        const separator = address.lastIndexOf(':');
-        host = address.slice(0, separator);
-        port = Number(address.slice(separator + 1));
-        explicitPort = true;
-    }
-    if (!host || /\s/.test(host) || !Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error('Server port must be between 1 and 65535.');
-    }
-    return { host, port, explicitPort };
-}
-
-function publicProxy(proxy) {
-    const normalized = normalizeProxy(proxy);
-    return normalized ? {
-        enabled: true,
-        host: normalized.host,
-        port: normalized.port,
-        address: `${normalized.host}:${normalized.port}`,
-        username: normalized.username || null
-    } : { enabled: false, address: null, username: null };
-}
-
-function parseServerAddress(value) {
-    const { host, port } = parseAddress(value);
-    return { host, port };
-}
-
-function normalizeMinecraftVersion(value) {
-    const version = String(value || 'auto').trim();
-    if (!version || version.toLowerCase() === 'auto') return null;
-    if (!/^1\.\d+(?:\.\d+)?$/.test(version)) throw new Error('Minecraft version must look like 1.21.1 or be auto.');
-    return version;
-}
-
-function normalizeVersion(value) {
-    return normalizeMinecraftVersion(value) || 'auto';
-}
-
-function normalizeJoinCommand(value) {
-    const command = optionalValue(value);
-    if (!command) return null;
-    if (!command.startsWith('/') || command.length > 256) throw new Error('Join command must start with / and be at most 256 characters.');
-    return command;
-}
-
-function detectCrackedAuthAction(message) {
-    const text = String(message || '');
-    if (/\/register\b|\/reg\b|please\s+register|not\s+registered|create\s+(?:a\s+)?password/i.test(text)) return 'register';
-    if (/\/login\b|\/l\s+(?:password|<)|please\s+(?:log\s?in|authenticate)|already\s+registered|enter\s+(?:your\s+)?password/i.test(text)) return 'login';
-    return null;
-}
-
-function isCrackedAuthSuccess(message) {
-    return /successfully\s+(?:logged\s+in|registered|authenticated)|login\s+successful|registration\s+successful|you\s+are\s+now\s+(?:logged\s+in|authenticated)/i
-        .test(String(message || ''));
 }
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -589,9 +354,9 @@ function inspectSpawnerLoot(window) {
         item.name === 'arrow' || item.name === 'spectral_arrow' ||
         item.name === 'tipped_arrow' || item.name.endsWith('_arrow') ||
         /\barrows?\b/.test(itemSearchText(item)));
-    const boneStacks = lootItems.filter(item =>
-        item.name === 'bone' || /\bbones?\b/.test(itemSearchText(item))).length;
-    return { hasArrows, hasBones: boneStacks > 0, boneStacks };
+    const hasBones = lootItems.some(item =>
+        item.name === 'bone' || /\bbones?\b/.test(itemSearchText(item)));
+    return { hasArrows, hasBones };
 }
 
 async function waitUntil(check, timeoutMs = 4000, intervalMs = 100) {
@@ -715,8 +480,6 @@ async function runBoneDropCycle(bot) {
 function reportBoneDropProblem(session, error) {
     const errorMessage = error?.message || String(error);
     const now = Date.now();
-    ensureSessionMetrics(session).boneDropFailures++;
-    saveSessions();
     if (session.lastBoneDropError === errorMessage && now - (session.lastBoneDropErrorAt || 0) < 300000) return;
     session.lastBoneDropError = errorMessage;
     session.lastBoneDropErrorAt = now;
@@ -755,11 +518,7 @@ function saveSessions() {
             server_ip: session.server_ip,
             password: session.password,
             authType: session.authType,
-            version: normalizeVersion(session.version),
-            proxy: normalizeProxy(session.proxy),
-            emergencyStopped: Boolean(session.emergencyStopped),
             metrics: ensureSessionMetrics(session),
-            analytics: ensureSessionAnalytics(session),
             boneDropEnabled: Boolean(session.boneDropEnabled),
             boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds),
             schedule: normalizeSchedule(session.schedule)
@@ -790,33 +549,24 @@ async function loadSessions() {
                     server_ip: s.server_ip,
                     password: s.password,
                     authType: s.authType,
-                    version: normalizeVersion(s.version),
-                    proxy: normalizeProxy(s.proxy || (s.proxy_host ? {
-                        host: s.proxy_host,
-                        port: s.proxy_port
-                    } : null)),
                     metrics: normalizeSessionMetrics(s.metrics),
-                    analytics: normalizeAnalytics(s.analytics),
                     boneDropEnabled: Boolean(s.boneDropEnabled),
                     boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(s.boneDropIntervalSeconds),
                     schedule: normalizeSchedule(s.schedule),
                     discordChannel: createSessionChannel(channelId, discordChannel),
-                    stopped: Boolean(s.emergencyStopped),
+                    stopped: false,
                     bot: null,
                     reconnectTimer: null,
                     lastBoneDropError: null,
                     lastBoneDropErrorAt: 0,
                     schedulePaused: false,
                     highPingHits: 0,
-                    lastHighPingReconnectAt: 0,
-                    emergencyStopped: Boolean(s.emergencyStopped)
+                    lastHighPingReconnectAt: 0
                 });
                 
                 const restoredSession = botSessions.get(channelId);
                 const restoredClock = scheduleClock(restoredSession.schedule.timezone);
-                if (restoredSession.emergencyStopped) {
-                    addDashboardLog(channelId, `${restoredSession.username} remains stopped by Emergency Stop.`);
-                } else if (scheduleShouldPause(restoredSession.schedule, restoredClock)) {
+                if (scheduleShouldPause(restoredSession.schedule, restoredClock)) {
                     restoredSession.schedulePaused = true;
                     restoredSession.stopped = true;
                     addDashboardLog(channelId, `Scheduler kept ${restoredSession.username} paused after restart.`);
@@ -860,43 +610,25 @@ function spawnDynamicBot(channelId) {
     const session = botSessions.get(channelId);
     if (!session || session.stopped) return;
 
-    const { host, port } = parseServerAddress(session.server_ip);
+    let host = session.server_ip;
+    let port = 25565;
+    
+    if (session.server_ip.includes(':')) {
+        const parts = session.server_ip.split(':');
+        host = parts[0];
+        port = parseInt(parts[1], 10);
+    }
 
+    // Prepare createBot options
     const botOptions = {
-        host,
-        port,
+        host: host,
+        port: port,
         username: session.username,
         auth: session.authType,
+        version: '1.21.1',
         hideErrors: true,
         viewDistance: 2
     };
-    const requestedVersion = normalizeVersion(session.version);
-    if (requestedVersion !== 'auto') botOptions.version = requestedVersion;
-
-    const proxy = normalizeProxy(session.proxy);
-    if (proxy) {
-        botOptions.connect = client => {
-            SocksClient.createConnection({
-                proxy: {
-                    host: proxy.host,
-                    port: proxy.port,
-                    type: 5,
-                    userId: proxy.username || undefined,
-                    password: proxy.password || undefined
-                },
-                command: 'connect',
-                destination: { host, port }
-            }).then(info => {
-                client.setSocket(info.socket);
-                client.emit('connect');
-            }).catch(error => {
-                addDashboardLog(channelId, `Proxy connection failed: ${error.message}`);
-                client.emit('error', error);
-                client.emit('end');
-            });
-        };
-        addDashboardLog(channelId, `Connecting through SOCKS5 proxy ${proxy.host}:${proxy.port}.`);
-    }
 
     const bot = mineflayer.createBot(botOptions);
 
@@ -920,25 +652,22 @@ function spawnDynamicBot(channelId) {
 
     bot.on('spawn', () => {
         const botName = bot.username;
-        if (!bot.customPassword || session.authType === 'microsoft') bot.isAuthenticated = true;
         const metrics = ensureSessionMetrics(session);
         metrics.connections++;
         metrics.lastOnlineAt = new Date().toISOString();
         bot.onlineSince = Date.now();
         saveSessions();
         broadcastDashboardEvent('status', { sessionId: channelId, state: 'online' });
-        session.detectedVersion = bot.version || requestedVersion;
-        session.discordChannel.send(`✅ **${botName}** spawned using Minecraft **${session.detectedVersion || 'auto'}**.`).catch(() => {});
+        session.discordChannel.send(`✅ **${botName}** spawned! *(Waiting 10 seconds to route...)*`).catch(() => {});
         
         if (bot.afkInterval) clearInterval(bot.afkInterval);
 
         // Turn off heavy physics calculations immediately to save CPU
         bot.physicsEnabled = false;
 
-        // FatalMC-specific routing is kept only for FatalMC accounts. Other
-        // cracked servers are not sent a network-specific command.
-        if (/fatalmc/i.test(host)) bot.lifestealTimer = setTimeout(() => {
-            if (session.stopped || session.bot !== bot || !bot.isAuthenticated) return;
+        // 10-Second Auto-Route Logic
+        bot.lifestealTimer = setTimeout(() => {
+            if (session.stopped || session.bot !== bot) return;
 
             session.discordChannel.send(`➡️ 10 seconds passed. Sent \`/server lifesteal\`...`).catch(() => {});
             
@@ -985,26 +714,20 @@ function spawnDynamicBot(channelId) {
 
         const lowerMsg = message.toLowerCase();
         session.discordChannel.send(`💬 ${message}`).catch(() => {});
-        recordEconomyMessage(session, message);
 
-        // Common cracked-server authentication prompts (AuthMe and similar).
+        // Authentication Logic
         if (bot.customPassword && !bot.isAuthenticated && !bot.authSent) {
-            const authAction = detectCrackedAuthAction(message);
-            if (authAction === 'register') {
+            if (lowerMsg.includes('/register')) {
                 bot.authSent = true;
                 try { bot.chat(`/register ${bot.customPassword} ${bot.customPassword}`); } catch(e) {}
-            } else if (authAction === 'login') {
+            } else if (lowerMsg.includes('/login')) {
                 bot.authSent = true;
                 try { bot.chat(`/login ${bot.customPassword}`); } catch(e) {}
             }
-            if (bot.authSent) {
-                setTimeout(() => {
-                    if (session.bot === bot && !bot.isAuthenticated) bot.authSent = false;
-                }, 7000);
-            }
         }
 
-        if (bot.customPassword && !bot.isAuthenticated && isCrackedAuthSuccess(message)) {
+        if (bot.customPassword && !bot.isAuthenticated && 
+           (lowerMsg.includes('successfully') || lowerMsg.includes('logged in') || lowerMsg.includes('authenticated') || lowerMsg.includes('success'))) {
             
             bot.isAuthenticated = true;
             session.discordChannel.send(`🔑 **${bot.username}** authenticated!`).catch(() => {});
@@ -1156,8 +879,6 @@ function evaluateSessionSchedule(sessionId, session, now = new Date()) {
     const schedule = session.schedule;
     const clock = scheduleClock(schedule.timezone, now);
 
-    if (session.emergencyStopped) return;
-
     if (!schedule.enabled) {
         if (session.schedulePaused) resumeSessionFromSchedule(sessionId, session);
         if (session.bot?.scheduleSellInterval) {
@@ -1221,46 +942,13 @@ const scheduleEngine = setInterval(() => {
 }, 15000);
 scheduleEngine.unref();
 
-let performanceSnapshot = { cpuPercent: 0, memoryMb: Math.round(process.memoryUsage().rss / 1048576) };
-let previousCpuUsage = process.cpuUsage();
-let previousCpuTime = process.hrtime.bigint();
-let analyticsTicks = 0;
-const analyticsEngine = setInterval(() => {
-    const now = Date.now();
-    const currentCpuTime = process.hrtime.bigint();
-    const elapsedMicros = Number(currentCpuTime - previousCpuTime) / 1000;
-    const cpuDelta = process.cpuUsage(previousCpuUsage);
-    const usedMicros = cpuDelta.user + cpuDelta.system;
-    performanceSnapshot = {
-        cpuPercent: Math.round(Math.min(999, usedMicros / Math.max(1, elapsedMicros) * 100) * 10) / 10,
-        memoryMb: Math.round(process.memoryUsage().rss / 1048576)
-    };
-    previousCpuUsage = process.cpuUsage();
-    previousCpuTime = currentCpuTime;
-
-    for (const session of botSessions.values()) {
-        const bot = session.bot;
-        const samples = ensureSessionAnalytics(session).samples;
-        samples.push({
-            time: now,
-            online: Boolean(bot?.entity && bot.isAlive && !session.stopped),
-            ping: Number.isFinite(bot?.player?.ping) ? Math.round(bot.player.ping) : null
-        });
-        if (samples.length > 10080) samples.splice(0, samples.length - 10080);
-    }
-    analyticsTicks++;
-    if (analyticsTicks % 5 === 0) saveSessions();
-    broadcastDashboardEvent('status', { analytics: true });
-}, 60000);
-analyticsEngine.unref();
-
 // ==========================================
 // 3. Discord Bot Logic
 // ==========================================
 
 discordClient.once('clientReady', async () => {
     console.log(`Logged in to Discord as ${discordClient.user.tag}`);
-    console.log('Use /spawn <username> <ip> <password> <auth> [proxy:port|-] [version|auto] to begin.');
+    console.log('Use /spawn <username> <ip> <password> <auth> to begin.');
     
     await loadSessions();
 });
@@ -1278,33 +966,13 @@ discordClient.on('messageCreate', async (message) => {
         const authType = args[4] || 'offline'; 
 
         if (!username || !server_ip || !password) {
-            return message.reply("❌ **Invalid Format.** Use: `/spawn <username> <server_ip> <password> <auth> [proxy:port|-] [version|auto]`").catch(() => {});
-        }
-        let proxy;
-        let version;
-        try {
-            proxy = normalizeProxy(args[5] && args[5] !== '-' ? args[5] : null);
-            version = normalizeVersion(args[6]);
-        } catch (error) {
-            return message.reply(`❌ **Invalid connection settings:** ${error.message}`).catch(() => {});
+            return message.reply("❌ **Invalid Format.** Use: `/spawn <username> <server_ip> <password> <auth>`").catch(() => {});
         }
 
         const existingSession = Array.from(botSessions.values()).find(s => s.username.toLowerCase() === username.toLowerCase());
         if (existingSession) {
             return message.reply(`Bot **${username}** is already running in <#${existingSession.discordChannel.id}>.`).catch(() => {});
         }
-
-        const spawnKey = username.toLowerCase();
-        if (pendingDiscordSpawns.has(spawnKey)) {
-            return message.reply(`Bot **${username}** is already being created. Please wait.`).catch(() => {});
-        }
-        const expectedChannelName = `bot-${spawnKey}`;
-        const existingChannel = message.guild.channels.cache.find(channel =>
-            channel.type === ChannelType.GuildText && channel.name === expectedChannelName);
-        if (existingChannel) {
-            return message.reply(`A channel for **${username}** already exists at <#${existingChannel.id}>. Delete that stale channel before spawning it again.`).catch(() => {});
-        }
-        pendingDiscordSpawns.add(spawnKey);
 
         message.delete().catch(() => {});
         const tempReply = await message.channel.send(`⏳ Creating secure channel and spawning **${username}**...`).catch(() => {});
@@ -1323,7 +991,7 @@ discordClient.on('messageCreate', async (message) => {
             }
 
             const newChannel = await message.guild.channels.create({
-                name: expectedChannelName,
+                name: `bot-${username.toLowerCase()}`,
                 type: ChannelType.GuildText,
                 parent: category.id, 
                 permissionOverwrites: [
@@ -1337,12 +1005,9 @@ discordClient.on('messageCreate', async (message) => {
                 source: 'discord',
                 username: username,
                 server_ip: server_ip,
-                password: password === '-' ? '' : password,
+                password: password,
                 authType: authType,
-                version,
-                proxy,
                 metrics: normalizeSessionMetrics(),
-                analytics: normalizeAnalytics(),
                 boneDropEnabled: false,
                 boneDropIntervalSeconds: DEFAULT_BONE_DROP_INTERVAL_SECONDS,
                 schedule: normalizeSchedule(),
@@ -1353,25 +1018,16 @@ discordClient.on('messageCreate', async (message) => {
                 lastBoneDropError: null,
                 lastBoneDropErrorAt: 0,
                 schedulePaused: false,
-                    highPingHits: 0,
-                    lastHighPingReconnectAt: 0,
-                    emergencyStopped: false
+                highPingHits: 0,
+                lastHighPingReconnectAt: 0
             });
 
             saveSessions();
-            recordAudit(`discord:${message.author.id}`, 'bot.create', username, {
-                server: server_ip,
-                authType,
-                proxy: publicProxy(proxy).address,
-                version
-            });
             spawnDynamicBot(newChannel.id);
 
         } catch (error) {
             console.error(error);
             message.reply("❌ **Error:** Could not create a Discord channel.").catch(() => {});
-        } finally {
-            pendingDiscordSpawns.delete(spawnKey);
         }
         return; 
     }
@@ -1408,16 +1064,12 @@ discordClient.on('messageCreate', async (message) => {
                         server_ip: sessionData.server_ip,
                         password: sessionData.password,
                         authType: sessionData.authType,
-                        version: normalizeVersion(sessionData.version),
-                        proxy: normalizeProxy(sessionData.proxy),
-                        emergencyStopped: Boolean(sessionData.emergencyStopped),
                         metrics: normalizeSessionMetrics(sessionData.metrics),
-                        analytics: normalizeAnalytics(sessionData.analytics),
                         boneDropEnabled: Boolean(sessionData.boneDropEnabled),
                         boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(sessionData.boneDropIntervalSeconds),
                         schedule: normalizeSchedule(sessionData.schedule),
                         discordChannel: channel,
-                        stopped: Boolean(sessionData.emergencyStopped),
+                        stopped: false,
                         bot: null,
                         reconnectTimer: null,
                         lastBoneDropError: null,
@@ -1428,9 +1080,7 @@ discordClient.on('messageCreate', async (message) => {
                     });
                     const restoredSession = botSessions.get(channelId);
                     const restoredClock = scheduleClock(restoredSession.schedule.timezone);
-                    if (restoredSession.emergencyStopped) {
-                        addDashboardLog(channelId, `${restoredSession.username} remains stopped by Emergency Stop.`);
-                    } else if (scheduleShouldPause(restoredSession.schedule, restoredClock)) {
+                    if (scheduleShouldPause(restoredSession.schedule, restoredClock)) {
                         restoredSession.schedulePaused = true;
                         restoredSession.stopped = true;
                     } else {
@@ -1466,7 +1116,6 @@ discordClient.on('messageCreate', async (message) => {
 
         botSessions.clear();
         saveSessions();
-        recordAudit(`discord:${message.author.id}`, 'fleet.stop-delete', 'all bots');
         return;
     }
 
@@ -1484,7 +1133,6 @@ discordClient.on('messageCreate', async (message) => {
             
             botSessions.delete(message.channel.id);
             saveSessions();
-            recordAudit(`discord:${message.author.id}`, 'bot.remove', session.username);
             
             message.reply(`🛑 Stopping **${session.username}** and deleting channel in 5 seconds...`).catch(() => {});
             setTimeout(() => { message.channel.delete().catch(() => {}); }, 5000);
@@ -1497,12 +1145,6 @@ discordClient.on('messageCreate', async (message) => {
     const currentSession = botSessions.get(message.channel.id);
     if (currentSession && currentSession.bot) {
         const activeBot = currentSession.bot;
-        const discordActor = `discord:${message.author.id}`;
-        if (/^!(?:bonedrop|sellmacro|autoeat)\b/i.test(content.trim())) {
-            recordAudit(discordActor, 'bot.discord-command', currentSession.username, {
-                command: content.trim().slice(0, 80)
-            });
-        }
 
         const boneDropOnMatch = content.trim().match(/^!bonedrop\s+on(?:\s+(\d+))?$/i);
         if (boneDropOnMatch) {
@@ -1550,7 +1192,6 @@ discordClient.on('messageCreate', async (message) => {
         if (content.toLowerCase() === '!bonedrop now') {
             try {
                 const result = await runBoneDropCycle(activeBot);
-                recordBoneDropResult(currentSession, result);
                 if (result.soldAll) {
                     return message.reply(`🏹 Arrows detected after **${result.dropActions}** Drop Loot click(s). Clicked **Sell All** once.`).catch(() => {});
                 }
@@ -1559,8 +1200,6 @@ discordClient.on('messageCreate', async (message) => {
                 }
                 return message.reply(`🦴 Cleared the available bones using **${result.dropActions}** Drop Loot click(s).`).catch(() => {});
             } catch (error) {
-                ensureSessionMetrics(currentSession).boneDropFailures++;
-                saveSessions();
                 return message.reply(`❌ Bone Drop failed: \`${error.message}\``).catch(() => {});
             }
         }
@@ -1645,55 +1284,26 @@ discordClient.on('messageCreate', async (message) => {
 // 4. Web Dashboard
 // ==========================================
 
-function safeStringEqual(left, right) {
-    const received = crypto.createHash('sha256').update(String(left || '')).digest();
-    const expected = crypto.createHash('sha256').update(String(right || '')).digest();
+function dashboardPasswordMatches(value) {
+    const received = crypto.createHash('sha256').update(String(value || '')).digest();
+    const expected = crypto.createHash('sha256').update(DASHBOARD_PASSWORD).digest();
     return crypto.timingSafeEqual(received, expected);
 }
 
-function authenticateDashboardUser(username, password) {
-    const requested = String(username || 'admin').trim().toLowerCase();
-    const user = dashboardUsers.get(requested);
-    return user && safeStringEqual(password, user.password)
-        ? { username: user.username, role: user.role }
-        : null;
+function dashboardSessionToken() {
+    return crypto.createHmac('sha256', dashboardCookieSecret).update('mineflayer-dashboard').digest('base64url');
 }
 
-function dashboardSessionToken(user) {
-    const payload = Buffer.from(JSON.stringify({
-        username: user.username,
-        role: user.role,
-        expiresAt: Date.now() + DASHBOARD_SESSION_HOURS * 3600000
-    })).toString('base64url');
-    const signature = crypto.createHmac('sha256', dashboardCookieSecret).update(payload).digest('base64url');
-    return `${payload}.${signature}`;
-}
-
-function dashboardRequestUser(request) {
+function isDashboardAuthenticated(request) {
     const cookies = Object.fromEntries(
         String(request.headers.cookie || '')
             .split(';')
             .map(part => part.trim().split('='))
             .filter(parts => parts.length === 2)
     );
-    const [payload, signature] = String(cookies.dashboard_session || '').split('.');
-    if (!payload || !signature) return null;
-    const expected = crypto.createHmac('sha256', dashboardCookieSecret).update(payload).digest('base64url');
-    const receivedBuffer = Buffer.from(signature);
-    const expectedBuffer = Buffer.from(expected);
-    if (receivedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)) return null;
-    try {
-        const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-        const configured = dashboardUsers.get(parsed.username);
-        if (!configured || configured.role !== parsed.role || parsed.expiresAt <= Date.now()) return null;
-        return { username: configured.username, role: configured.role, expiresAt: parsed.expiresAt };
-    } catch (error) {
-        return null;
-    }
-}
-
-function requireDashboardAdmin(user) {
-    if (user?.role !== 'admin') throw new Error('Administrator access is required for this action.');
+    const received = Buffer.from(cookies.dashboard_session || '');
+    const expected = Buffer.from(dashboardSessionToken());
+    return received.length === expected.length && crypto.timingSafeEqual(received, expected);
 }
 
 function sendJson(response, statusCode, payload, extraHeaders = {}) {
@@ -1747,14 +1357,10 @@ function dashboardBotSummary(id, session) {
     const spawned = Boolean(bot?.entity);
     const position = bot?.entity?.position;
     let state = 'reconnecting';
-    if (session.emergencyStopped) state = 'emergency';
-    else if (session.schedulePaused) state = 'paused';
+    if (session.schedulePaused) state = 'paused';
     else if (session.stopped) state = 'stopped';
     else if (spawned) state = 'online';
     else if (bot) state = 'connecting';
-    const metrics = ensureSessionMetrics(session);
-    const analytics = ensureSessionAnalytics(session);
-    const boneDropTotal = metrics.boneDropSuccesses + metrics.boneDropFailures + metrics.boneDropEmpty;
 
     return {
         id,
@@ -1762,11 +1368,6 @@ function dashboardBotSummary(id, session) {
         username: session.username,
         server: session.server_ip,
         authType: session.authType,
-        version: {
-            requested: normalizeVersion(session.version),
-            detected: session.detectedVersion || bot?.version || null
-        },
-        proxy: publicProxy(session.proxy),
         state,
         health: Number.isFinite(bot?.health) ? Math.round(bot.health * 10) / 10 : null,
         food: Number.isFinite(bot?.food) ? bot.food : null,
@@ -1784,14 +1385,7 @@ function dashboardBotSummary(id, session) {
             sell: Boolean(bot?.sellInterval || bot?.scheduleSellInterval),
             autoEat: Boolean(bot?.autoEatInterval)
         },
-        metrics,
-        statistics: {
-            uptimeDay: availabilityPercentage(session, 24),
-            uptimeWeek: availabilityPercentage(session, 168),
-            boneDropSuccessRate: boneDropTotal ? Math.round(metrics.boneDropSuccesses / boneDropTotal * 1000) / 10 : null,
-            estimatedEarnings: Math.round(metrics.estimatedEarnings * 100) / 100,
-            pingHistory: analytics.samples.filter(sample => Number.isFinite(sample.ping)).slice(-120)
-        },
+        metrics: ensureSessionMetrics(session),
         inventory: dashboardInventory(bot),
         schedule: normalizeSchedule(session.schedule),
         nextScheduledAction: nextScheduledAction(normalizeSchedule(session.schedule)),
@@ -1804,18 +1398,6 @@ function createDashboardBot(payload) {
     const server_ip = String(payload.server || '').trim();
     const password = String(payload.password || '').trim();
     const authType = String(payload.authType || 'offline').toLowerCase();
-    const version = normalizeVersion(payload.version);
-    const hasProxyDetails = ['proxyHost', 'proxyPort', 'proxyUsername', 'proxyPassword']
-        .some(key => String(payload[key] || '').trim());
-    if (hasProxyDetails && (!String(payload.proxyHost || '').trim() || !String(payload.proxyPort || '').trim())) {
-        throw new Error('Enter both the SOCKS5 proxy host and port.');
-    }
-    const proxy = normalizeProxy(payload.proxy || (payload.proxyHost ? {
-        host: payload.proxyHost,
-        port: payload.proxyPort,
-        username: payload.proxyUsername,
-        password: payload.proxyPassword
-    } : null));
 
     if (!/^[A-Za-z0-9_]{1,16}$/.test(username)) {
         throw new Error('Minecraft username must be 1-16 letters, numbers, or underscores.');
@@ -1837,10 +1419,7 @@ function createDashboardBot(payload) {
         server_ip,
         password: password === '-' ? '' : password,
         authType,
-        version,
-        proxy,
         metrics: normalizeSessionMetrics(),
-        analytics: normalizeAnalytics(),
         boneDropEnabled: false,
         boneDropIntervalSeconds: DEFAULT_BONE_DROP_INTERVAL_SECONDS,
         schedule: normalizeSchedule(),
@@ -1852,8 +1431,7 @@ function createDashboardBot(payload) {
         lastBoneDropErrorAt: 0,
         schedulePaused: false,
         highPingHits: 0,
-        lastHighPingReconnectAt: 0,
-        emergencyStopped: false
+        lastHighPingReconnectAt: 0
     });
     addDashboardLog(id, `Dashboard created ${username} for ${server_ip}.`);
     saveSessions();
@@ -1908,18 +1486,6 @@ async function runDashboardAction(id, payload) {
     const action = String(payload.action || '').toLowerCase();
     const bot = session.bot;
 
-    if (action === 'stop') {
-        session.stopped = true;
-        session.emergencyStopped = false;
-        if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
-        session.reconnectTimer = null;
-        clearManagedBotTimers(bot);
-        if (bot) {
-            try { bot.quit(); } catch (error) {}
-        }
-        return { message: `${session.username} was stopped without deleting its saved account.` };
-    }
-
     if (action === 'remove') {
         removeManagedBot(id);
         return { message: `${session.username} was removed.` };
@@ -1929,7 +1495,6 @@ async function runDashboardAction(id, payload) {
         if (session.schedulePaused) {
             throw new Error('This bot is paused by its schedule. Change or disable the schedule first.');
         }
-        session.emergencyStopped = false;
         session.stopped = false;
         if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
         if (bot) {
@@ -1952,32 +1517,6 @@ async function runDashboardAction(id, payload) {
         };
     }
 
-    if (action === 'connection-save') {
-        session.version = normalizeVersion(payload.version);
-        if (payload.proxyEnabled) {
-            const existingProxy = normalizeProxy(session.proxy);
-            session.proxy = normalizeProxy({
-                host: payload.proxyHost,
-                port: payload.proxyPort,
-                username: payload.proxyUsername,
-                password: String(payload.proxyPassword || '') || existingProxy?.password || ''
-            });
-        } else {
-            session.proxy = null;
-        }
-        saveSessions();
-        const reconnectNow = payload.reconnect !== false && !session.schedulePaused && !session.emergencyStopped;
-        if (reconnectNow) {
-            session.stopped = false;
-            if (bot) {
-                try { bot.quit(); } catch (error) {}
-            } else {
-                spawnDynamicBot(id);
-            }
-        }
-        return { message: `Connection settings saved${reconnectNow ? ' and reconnecting.' : '. They will apply on the next connection.'}` };
-    }
-
     if (!bot) throw new Error('The bot is currently disconnected. Try reconnecting it first.');
 
     if (action === 'send') {
@@ -1985,10 +1524,7 @@ async function runDashboardAction(id, payload) {
         if (!text || text.length > 256) throw new Error('Enter a command or chat message up to 256 characters.');
         if (!bot.entity) throw new Error('The bot has not finished connecting yet.');
         bot.chat(text);
-        const safeText = /^\/(?:login|register|reg)\s+/i.test(text)
-            ? `${text.split(/\s+/)[0]} [password hidden]`
-            : text;
-        addDashboardLog(id, `You sent: ${safeText}`);
+        addDashboardLog(id, `You sent: ${text}`);
         return { message: 'Message sent.' };
     }
 
@@ -2043,8 +1579,7 @@ async function runDashboardAction(id, payload) {
     throw new Error('Unknown dashboard action.');
 }
 
-async function executeDashboardAction(id, payload, actor = null) {
-    const targetName = botSessions.get(id)?.username || id;
+async function executeDashboardAction(id, payload) {
     const result = await runDashboardAction(id, payload);
     const session = botSessions.get(id);
     if (session) {
@@ -2052,18 +1587,14 @@ async function executeDashboardAction(id, payload, actor = null) {
         if (payload.action !== 'send') addDashboardLog(id, `Dashboard: ${result.message}`);
         saveSessions();
     }
-    if (actor) recordAudit(actor, `bot.${String(payload.action || 'unknown')}`, targetName, {
-        seconds: payload.seconds == null ? null : Number(payload.seconds),
-        scheduleEnabled: payload.action === 'schedule-save' ? Boolean(payload.schedule?.enabled) : null
-    });
     broadcastDashboardEvent('status', { sessionId: id });
     return result;
 }
 
-async function runFleetAction(payload, actor = null) {
+async function runFleetAction(payload) {
     const ids = Array.isArray(payload.ids) ? [...new Set(payload.ids.map(String))] : [];
     if (!ids.length || ids.length > 100) throw new Error('Select between 1 and 100 bots.');
-    const allowed = new Set(['stop', 'reconnect', 'bonedrop-on', 'bonedrop-off', 'sell-on', 'sell-off', 'autoeat-on', 'autoeat-off']);
+    const allowed = new Set(['reconnect', 'bonedrop-on', 'bonedrop-off', 'sell-on', 'sell-off', 'autoeat-on', 'autoeat-off']);
     if (!allowed.has(payload.action)) throw new Error('That action is not available for bulk control.');
 
     const results = await Promise.all(ids.map(async id => {
@@ -2075,91 +1606,7 @@ async function runFleetAction(payload, actor = null) {
         }
     }));
     const succeeded = results.filter(result => result.ok).length;
-    if (actor) recordAudit(actor, `fleet.${payload.action}`, `${ids.length} bot(s)`, { succeeded });
     return { message: `Completed for ${succeeded} of ${results.length} selected bots.`, results };
-}
-
-function emergencyStopAll(actor) {
-    let stopped = 0;
-    for (const [id, session] of botSessions.entries()) {
-        session.emergencyStopped = true;
-        session.stopped = true;
-        session.schedulePaused = false;
-        if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
-        session.reconnectTimer = null;
-        clearManagedBotTimers(session.bot);
-        if (session.bot) {
-            try { session.bot.quit(); } catch (error) {}
-            stopped++;
-        }
-        addDashboardLog(id, `Emergency Stop activated by ${actor.username}.`);
-    }
-    saveSessions();
-    recordAudit(actor, 'fleet.emergency-stop', 'all bots', { stopped });
-    broadcastDashboardEvent('status', { emergencyStop: true });
-    return { message: `Emergency Stop activated for ${botSessions.size} managed bot(s).` };
-}
-
-function exportedConfiguration() {
-    return {
-        format: 'craftcontrol-settings',
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        accounts: Array.from(botSessions.entries()).map(([id, session]) => {
-            const schedule = normalizeSchedule(session.schedule);
-            delete schedule.lastBoneDropRunKey;
-            const proxy = normalizeProxy(session.proxy);
-            return {
-                id,
-                username: session.username,
-                server: session.server_ip,
-                authType: session.authType,
-                version: normalizeVersion(session.version),
-                proxy: proxy ? {
-                    host: proxy.host,
-                    port: proxy.port,
-                    username: proxy.username || ''
-                } : null,
-                boneDropEnabled: Boolean(session.boneDropEnabled),
-                boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds),
-                schedule
-            };
-        })
-    };
-}
-
-function importConfiguration(payload, actor) {
-    if (payload?.format !== 'craftcontrol-settings' || !Array.isArray(payload.accounts)) {
-        throw new Error('This is not a valid CraftControl settings backup.');
-    }
-    if (payload.accounts.length > 100) throw new Error('A backup can contain at most 100 accounts.');
-    let updated = 0;
-    for (const imported of payload.accounts) {
-        const match = [...botSessions.entries()].find(([id, session]) =>
-            id === imported.id ||
-            (session.username.toLowerCase() === String(imported.username || '').toLowerCase() &&
-                session.server_ip === imported.server));
-        if (!match) continue;
-        const [id, session] = match;
-        session.schedule = normalizeSchedule(imported.schedule);
-        session.version = normalizeVersion(imported.version);
-        session.boneDropEnabled = Boolean(imported.boneDropEnabled);
-        session.boneDropIntervalSeconds = normalizeBoneDropIntervalSeconds(imported.boneDropIntervalSeconds);
-        if (imported.proxy?.host) {
-            const current = normalizeProxy(session.proxy);
-            session.proxy = normalizeProxy({
-                ...imported.proxy,
-                password: current?.password || ''
-            });
-        } else {
-            session.proxy = null;
-        }
-        evaluateSessionSchedule(id, session);
-        updated++;
-    }
-    saveSessions();
-    recordAudit(actor, 'settings.import', `${updated} account(s)`);
-    return { message: `Imported settings for ${updated} matching account(s).` };
 }
 
 function serveDashboardFile(response, pathname) {
@@ -2199,12 +1646,11 @@ function startDashboardServer() {
 
             if (request.method === 'POST' && url.pathname === '/api/login') {
                 const payload = await readJsonBody(request);
-                const dashboardUser = authenticateDashboardUser(payload.username, payload.password);
-                if (!dashboardUser) return sendJson(response, 401, { error: 'Incorrect dashboard username or password.' });
-                recordAudit(dashboardUser, 'dashboard.login');
-                const secure = request.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
-                return sendJson(response, 200, { ok: true, user: dashboardUser }, {
-                    'Set-Cookie': `dashboard_session=${dashboardSessionToken(dashboardUser)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${DASHBOARD_SESSION_HOURS * 3600}${secure}`
+                if (!dashboardPasswordMatches(payload.password)) {
+                    return sendJson(response, 401, { error: 'Incorrect dashboard password.' });
+                }
+                return sendJson(response, 200, { ok: true }, {
+                    'Set-Cookie': `dashboard_session=${dashboardSessionToken()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`
                 });
             }
 
@@ -2214,20 +1660,8 @@ function startDashboardServer() {
                 });
             }
 
-            const dashboardUser = dashboardRequestUser(request);
-            if (!dashboardUser) {
+            if (!isDashboardAuthenticated(request)) {
                 return sendJson(response, 401, { error: 'Log in to use the dashboard.' });
-            }
-
-            // Renew the signed session only when the browser reports recent
-            // human input. Background status polling therefore cannot keep an
-            // abandoned dashboard session alive forever.
-            if (request.headers['x-dashboard-activity'] === '1') {
-                const secure = request.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
-                response.setHeader(
-                    'Set-Cookie',
-                    `dashboard_session=${dashboardSessionToken(dashboardUser)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${DASHBOARD_SESSION_HOURS * 3600}${secure}`
-                );
             }
 
             if (request.method === 'GET' && url.pathname === '/api/events') {
@@ -2248,58 +1682,22 @@ function startDashboardServer() {
                     bots: Array.from(botSessions.entries()).map(([id, session]) => dashboardBotSummary(id, session)),
                     discord: discordClient.isReady(),
                     uptime: Math.floor(process.uptime()),
-                    performance: performanceSnapshot,
-                    user: { username: dashboardUser.username, role: dashboardUser.role },
                     liveEvents: true
                 });
             }
 
-            if (request.method === 'GET' && url.pathname === '/api/audit') {
-                return sendJson(response, 200, { entries: auditLog.slice(-200).reverse() });
-            }
-
-            if (request.method === 'GET' && url.pathname === '/api/export') {
-                requireDashboardAdmin(dashboardUser);
-                recordAudit(dashboardUser, 'settings.export');
-                return sendJson(response, 200, exportedConfiguration());
-            }
-
-            if (request.method === 'POST' && url.pathname === '/api/import') {
-                requireDashboardAdmin(dashboardUser);
-                return sendJson(response, 200, importConfiguration(await readJsonBody(request), dashboardUser));
-            }
-
-            if (request.method === 'POST' && url.pathname === '/api/emergency-stop') {
-                requireDashboardAdmin(dashboardUser);
-                const payload = await readJsonBody(request);
-                if (payload.confirmation !== 'STOP ALL') throw new Error('Type STOP ALL to confirm the emergency stop.');
-                return sendJson(response, 200, emergencyStopAll(dashboardUser));
-            }
-
             if (request.method === 'POST' && url.pathname === '/api/bots') {
-                requireDashboardAdmin(dashboardUser);
                 const bot = createDashboardBot(await readJsonBody(request));
-                recordAudit(dashboardUser, 'bot.create', bot.username, {
-                    server: bot.server,
-                    proxy: bot.proxy.enabled,
-                    version: bot.version.requested
-                });
                 return sendJson(response, 201, { bot });
             }
 
             if (request.method === 'POST' && url.pathname === '/api/fleet/actions') {
-                requireDashboardAdmin(dashboardUser);
-                return sendJson(response, 200, await runFleetAction(await readJsonBody(request), dashboardUser));
+                return sendJson(response, 200, await runFleetAction(await readJsonBody(request)));
             }
 
             const actionMatch = url.pathname.match(/^\/api\/bots\/([^/]+)\/actions$/);
             if (request.method === 'POST' && actionMatch) {
-                requireDashboardAdmin(dashboardUser);
-                const result = await executeDashboardAction(
-                    decodeURIComponent(actionMatch[1]),
-                    await readJsonBody(request),
-                    dashboardUser
-                );
+                const result = await executeDashboardAction(decodeURIComponent(actionMatch[1]), await readJsonBody(request));
                 return sendJson(response, 200, result);
             }
 
@@ -2318,29 +1716,11 @@ function startDashboardServer() {
     dashboardHeartbeat.unref();
     server.listen(DASHBOARD_PORT, DASHBOARD_HOST, () => {
         console.log(`Dashboard listening on http://${DASHBOARD_HOST}:${DASHBOARD_PORT}`);
-        if (!process.env.DASHBOARD_PASSWORD && !process.env.DASHBOARD_USERS) {
+        if (!process.env.DASHBOARD_PASSWORD) {
             console.log(`Dashboard password (set DASHBOARD_PASSWORD to keep it after restart): ${generatedDashboardPassword}`);
         }
     });
-    return server;
 }
 
-if (require.main === module) {
-    startDashboardServer();
-    discordClient.login(process.env.DISCORD_TOKEN);
-}
-
-module.exports = {
-    detectCrackedAuthAction,
-    findSellAllSlot,
-    inspectSpawnerLoot,
-    isCrackedAuthSuccess,
-    normalizeBoneDropIntervalSeconds,
-    normalizeJoinCommand,
-    normalizeMinecraftVersion,
-    normalizeProxy,
-    optionalValue,
-    parseAddress,
-    publicProxy,
-    startDashboardServer
-};
+startDashboardServer();
+discordClient.login(process.env.DISCORD_TOKEN);
