@@ -16,6 +16,33 @@ let refreshTimer = null;
 let toastTimer = null;
 let eventStream = null;
 let liveRefreshTimer = null;
+let scheduleDirty = false;
+
+function browserTimezone() {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata';
+}
+
+function defaultSchedule() {
+    return {
+        enabled: false,
+        timezone: browserTimezone(),
+        days: [0, 1, 2, 3, 4, 5, 6],
+        activeHoursEnabled: false,
+        startTime: '06:00',
+        stopTime: '23:00',
+        boneDropScheduleEnabled: false,
+        boneDropTimes: [],
+        sellWindowEnabled: false,
+        sellStartTime: '06:00',
+        sellStopTime: '23:00',
+        sellIntervalSeconds: 30,
+        maintenanceEnabled: false,
+        maintenanceStartTime: '03:00',
+        maintenanceStopTime: '04:00',
+        highPingEnabled: false,
+        highPingThreshold: 500
+    };
+}
 
 async function api(url, options = {}) {
     const response = await fetch(url, {
@@ -91,6 +118,9 @@ function botCard(bot) {
         ['Sell Macro', bot.macros.sell],
         ['Auto-Eat', bot.macros.autoEat]
     ].map(([name, active]) => `<span class="tag${active ? ' active' : ''}">${name}</span>`).join('');
+    const nextAction = bot.nextScheduledAction
+        ? `${bot.nextScheduledAction.label} · ${bot.nextScheduledAction.when}`
+        : bot.schedule?.enabled ? 'No scheduled action configured' : 'Schedule disabled';
 
     return `
         <article class="bot-card${selectedBots.has(bot.id) ? ' selected' : ''}">
@@ -113,6 +143,7 @@ function botCard(bot) {
                 <div class="stat"><span>POSITION</span><strong>${position}</strong></div>
             </div>
             <div class="macro-tags">${tags}</div>
+            <div class="next-chip"><span>NEXT</span>${escapeHtml(nextAction)}</div>
             <div class="card-actions">
                 <span class="source-label">${escapeHtml(bot.source)} control</span>
                 <button class="ghost manage-button" type="button" data-manage="${encodeURIComponent(bot.id)}">Manage</button>
@@ -175,8 +206,37 @@ async function refreshStatus() {
 
 function openControls(id) {
     selectedBotId = id;
+    scheduleDirty = false;
     updateControlDialog();
     controlDialog.showModal();
+    updateControlDialog();
+}
+
+function populateScheduleForm(bot) {
+    const schedule = { ...defaultSchedule(), ...(bot.schedule || {}) };
+    document.querySelector('#scheduleEnabled').checked = schedule.enabled;
+    document.querySelector('#scheduleTimezone').value = schedule.timezone || browserTimezone();
+    document.querySelector('#scheduleTimezoneLabel').textContent = schedule.timezone || browserTimezone();
+    document.querySelector('#activeHoursEnabled').checked = schedule.activeHoursEnabled;
+    document.querySelector('#scheduleStartTime').value = schedule.startTime;
+    document.querySelector('#scheduleStopTime').value = schedule.stopTime;
+    document.querySelector('#boneDropScheduleEnabled').checked = schedule.boneDropScheduleEnabled;
+    document.querySelector('#boneDropTimes').value = (schedule.boneDropTimes || []).join(', ');
+    document.querySelector('#sellWindowEnabled').checked = schedule.sellWindowEnabled;
+    document.querySelector('#sellStartTime').value = schedule.sellStartTime;
+    document.querySelector('#sellStopTime').value = schedule.sellStopTime;
+    document.querySelector('#scheduledSellSeconds').value = schedule.sellIntervalSeconds;
+    document.querySelector('#maintenanceEnabled').checked = schedule.maintenanceEnabled;
+    document.querySelector('#maintenanceStartTime').value = schedule.maintenanceStartTime;
+    document.querySelector('#maintenanceStopTime').value = schedule.maintenanceStopTime;
+    document.querySelector('#highPingEnabled').checked = schedule.highPingEnabled;
+    document.querySelector('#highPingThreshold').value = schedule.highPingThreshold;
+    document.querySelector('#nextScheduledAction').textContent = bot.nextScheduledAction
+        ? `${bot.nextScheduledAction.label} · ${bot.nextScheduledAction.when}`
+        : schedule.enabled ? 'No timed action configured yet.' : 'Schedule is disabled.';
+    document.querySelectorAll('[name="scheduleDay"]').forEach(input => {
+        input.checked = schedule.days.includes(Number(input.value));
+    });
 }
 
 function updateControlDialog() {
@@ -201,6 +261,7 @@ function updateControlDialog() {
     document.querySelector('#detailDisconnects').textContent = metrics.disconnects || 0;
     document.querySelector('#detailDeaths').textContent = metrics.deaths || 0;
     document.querySelector('#detailDropClicks').textContent = metrics.boneDropClicks || 0;
+    if (!scheduleDirty) populateScheduleForm(bot);
 
     const inventory = document.querySelector('#inventoryGrid');
     const inventoryItems = bot.inventory || [];
@@ -237,6 +298,7 @@ async function performAction(action, values = {}) {
             controlDialog.close();
             selectedBotId = null;
         }
+        if (action === 'schedule-save') scheduleDirty = false;
         await refreshStatus();
     } catch (error) {
         message.textContent = error.message;
@@ -271,6 +333,45 @@ document.querySelectorAll('.create-trigger').forEach(button => button.addEventLi
 document.querySelector('#closeCreateButton').addEventListener('click', () => createDialog.close());
 document.querySelector('#cancelCreateButton').addEventListener('click', () => createDialog.close());
 document.querySelector('#closeControlButton').addEventListener('click', () => controlDialog.close());
+
+document.querySelector('#scheduleForm').addEventListener('input', () => {
+    scheduleDirty = true;
+});
+
+document.querySelector('#scheduleForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const days = [...document.querySelectorAll('[name="scheduleDay"]:checked')].map(input => Number(input.value));
+    if (!days.length) return showToast('Select at least one schedule day.', true);
+
+    const boneDropTimes = document.querySelector('#boneDropTimes').value
+        .split(',')
+        .map(value => value.trim())
+        .filter(Boolean);
+    if (boneDropTimes.some(value => !/^([01]\d|2[0-3]):[0-5]\d$/.test(value))) {
+        return showToast('Bone Drop times must use 24-hour HH:MM format, separated by commas.', true);
+    }
+
+    const schedule = {
+        enabled: document.querySelector('#scheduleEnabled').checked,
+        timezone: document.querySelector('#scheduleTimezone').value || browserTimezone(),
+        days,
+        activeHoursEnabled: document.querySelector('#activeHoursEnabled').checked,
+        startTime: document.querySelector('#scheduleStartTime').value,
+        stopTime: document.querySelector('#scheduleStopTime').value,
+        boneDropScheduleEnabled: document.querySelector('#boneDropScheduleEnabled').checked,
+        boneDropTimes,
+        sellWindowEnabled: document.querySelector('#sellWindowEnabled').checked,
+        sellStartTime: document.querySelector('#sellStartTime').value,
+        sellStopTime: document.querySelector('#sellStopTime').value,
+        sellIntervalSeconds: Number(document.querySelector('#scheduledSellSeconds').value),
+        maintenanceEnabled: document.querySelector('#maintenanceEnabled').checked,
+        maintenanceStartTime: document.querySelector('#maintenanceStartTime').value,
+        maintenanceStopTime: document.querySelector('#maintenanceStopTime').value,
+        highPingEnabled: document.querySelector('#highPingEnabled').checked,
+        highPingThreshold: Number(document.querySelector('#highPingThreshold').value)
+    };
+    await performAction('schedule-save', { schedule });
+});
 
 document.querySelector('#selectAllBots').addEventListener('change', event => {
     selectedBots.clear();

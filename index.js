@@ -3,7 +3,6 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
-const { SocksClient } = require('socks'); // Import SocksClient
 const mineflayer = require('mineflayer');
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
 
@@ -103,6 +102,155 @@ function normalizeBoneDropIntervalSeconds(value) {
         throw new Error(`Bone Drop cooldown must be a whole number from ${MIN_BONE_DROP_INTERVAL_SECONDS} to ${MAX_BONE_DROP_INTERVAL_SECONDS} seconds.`);
     }
     return seconds;
+}
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const scheduleFormatters = new Map();
+
+function normalizeClockTime(value, fallback) {
+    const time = String(value || fallback);
+    const match = time.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+    return match ? time : fallback;
+}
+
+function normalizeTimezone(value) {
+    const timezone = String(value || 'Asia/Kolkata').slice(0, 80);
+    try {
+        new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date());
+        return timezone;
+    } catch (error) {
+        return 'Asia/Kolkata';
+    }
+}
+
+function normalizeSchedule(value = {}) {
+    const rawTimes = Array.isArray(value.boneDropTimes)
+        ? value.boneDropTimes
+        : String(value.boneDropTimes || '').split(',');
+    const boneDropTimes = [...new Set(rawTimes
+        .map(time => normalizeClockTime(String(time).trim(), ''))
+        .filter(Boolean))].sort();
+    const days = [...new Set((Array.isArray(value.days) ? value.days : [0, 1, 2, 3, 4, 5, 6])
+        .map(Number)
+        .filter(day => Number.isInteger(day) && day >= 0 && day <= 6))];
+    const sellIntervalSeconds = Number.parseInt(value.sellIntervalSeconds, 10);
+    const highPingThreshold = Number.parseInt(value.highPingThreshold, 10);
+
+    return {
+        enabled: Boolean(value.enabled),
+        timezone: normalizeTimezone(value.timezone),
+        days: days.length ? days : [0, 1, 2, 3, 4, 5, 6],
+        activeHoursEnabled: Boolean(value.activeHoursEnabled),
+        startTime: normalizeClockTime(value.startTime, '06:00'),
+        stopTime: normalizeClockTime(value.stopTime, '23:00'),
+        boneDropScheduleEnabled: Boolean(value.boneDropScheduleEnabled),
+        boneDropTimes,
+        sellWindowEnabled: Boolean(value.sellWindowEnabled),
+        sellStartTime: normalizeClockTime(value.sellStartTime, '06:00'),
+        sellStopTime: normalizeClockTime(value.sellStopTime, '23:00'),
+        sellIntervalSeconds: Number.isInteger(sellIntervalSeconds) && sellIntervalSeconds >= 1 && sellIntervalSeconds <= 86400 ? sellIntervalSeconds : 30,
+        maintenanceEnabled: Boolean(value.maintenanceEnabled),
+        maintenanceStartTime: normalizeClockTime(value.maintenanceStartTime, '03:00'),
+        maintenanceStopTime: normalizeClockTime(value.maintenanceStopTime, '04:00'),
+        highPingEnabled: Boolean(value.highPingEnabled),
+        highPingThreshold: Number.isInteger(highPingThreshold) && highPingThreshold >= 50 && highPingThreshold <= 5000 ? highPingThreshold : 500,
+        lastBoneDropRunKey: typeof value.lastBoneDropRunKey === 'string' ? value.lastBoneDropRunKey : null
+    };
+}
+
+function timeToMinutes(value) {
+    const [hours, minutes] = value.split(':').map(Number);
+    return hours * 60 + minutes;
+}
+
+function scheduleClock(timezone, date = new Date()) {
+    if (!scheduleFormatters.has(timezone)) {
+        scheduleFormatters.set(timezone, new Intl.DateTimeFormat('en-US', {
+            timeZone: timezone,
+            weekday: 'short',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hourCycle: 'h23'
+        }));
+    }
+    const parts = Object.fromEntries(scheduleFormatters.get(timezone).formatToParts(date).map(part => [part.type, part.value]));
+    const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(parts.weekday);
+    const hour = Number(parts.hour);
+    const minute = Number(parts.minute);
+    return {
+        day,
+        minutes: hour * 60 + minute,
+        time: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
+        dateKey: `${parts.year}-${parts.month}-${parts.day}`
+    };
+}
+
+function isRecurringWindowActive(clock, days, startTime, stopTime) {
+    const start = timeToMinutes(startTime);
+    const stop = timeToMinutes(stopTime);
+    if (start === stop) return days.includes(clock.day);
+    if (start < stop) return days.includes(clock.day) && clock.minutes >= start && clock.minutes < stop;
+    const previousDay = (clock.day + 6) % 7;
+    return (days.includes(clock.day) && clock.minutes >= start) ||
+        (days.includes(previousDay) && clock.minutes < stop);
+}
+
+function scheduleShouldPause(schedule, clock) {
+    if (!schedule.enabled) return false;
+    if (schedule.maintenanceEnabled && isRecurringWindowActive(
+        clock, schedule.days, schedule.maintenanceStartTime, schedule.maintenanceStopTime)) return true;
+    if (schedule.activeHoursEnabled && !isRecurringWindowActive(
+        clock, schedule.days, schedule.startTime, schedule.stopTime)) return true;
+    return false;
+}
+
+function nextScheduledAction(schedule, now = new Date()) {
+    if (!schedule.enabled) return null;
+    const clock = scheduleClock(schedule.timezone, now);
+    const candidates = [];
+    const addCandidate = (dayOffset, minute, label) => {
+        const deltaMinutes = dayOffset * 1440 + minute - clock.minutes;
+        if (deltaMinutes <= 0) return;
+        candidates.push({ deltaMinutes, label, dayOffset, time: `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}` });
+    };
+
+    for (let dayOffset = 0; dayOffset <= 8; dayOffset++) {
+        const day = (clock.day + dayOffset) % 7;
+        const previousDay = (day + 6) % 7;
+        if (schedule.activeHoursEnabled) {
+            if (schedule.days.includes(day)) addCandidate(dayOffset, timeToMinutes(schedule.startTime), 'Start bot');
+            const overnight = timeToMinutes(schedule.stopTime) <= timeToMinutes(schedule.startTime);
+            if ((overnight && schedule.days.includes(previousDay)) || (!overnight && schedule.days.includes(day))) {
+                addCandidate(dayOffset, timeToMinutes(schedule.stopTime), 'Pause bot');
+            }
+        }
+        if (schedule.boneDropScheduleEnabled && schedule.days.includes(day)) {
+            for (const time of schedule.boneDropTimes) addCandidate(dayOffset, timeToMinutes(time), 'Run Bone Drop');
+        }
+        if (schedule.sellWindowEnabled) {
+            if (schedule.days.includes(day)) addCandidate(dayOffset, timeToMinutes(schedule.sellStartTime), 'Enable Sell Macro');
+            const overnight = timeToMinutes(schedule.sellStopTime) <= timeToMinutes(schedule.sellStartTime);
+            if ((overnight && schedule.days.includes(previousDay)) || (!overnight && schedule.days.includes(day))) {
+                addCandidate(dayOffset, timeToMinutes(schedule.sellStopTime), 'Disable Sell Macro');
+            }
+        }
+        if (schedule.maintenanceEnabled) {
+            if (schedule.days.includes(day)) addCandidate(dayOffset, timeToMinutes(schedule.maintenanceStartTime), 'Begin maintenance pause');
+            const overnight = timeToMinutes(schedule.maintenanceStopTime) <= timeToMinutes(schedule.maintenanceStartTime);
+            if ((overnight && schedule.days.includes(previousDay)) || (!overnight && schedule.days.includes(day))) {
+                addCandidate(dayOffset, timeToMinutes(schedule.maintenanceStopTime), 'End maintenance pause');
+            }
+        }
+    }
+
+    candidates.sort((left, right) => left.deltaMinutes - right.deltaMinutes);
+    const next = candidates[0];
+    if (!next) return null;
+    const dayLabel = next.dayOffset === 0 ? 'Today' : next.dayOffset === 1 ? 'Tomorrow' : DAY_NAMES[(clock.day + next.dayOffset) % 7];
+    return { label: next.label, when: `${dayLabel} at ${next.time}`, minutes: next.deltaMinutes };
 }
 
 function extractMinecraftText(value, seen = new Set()) {
@@ -373,9 +521,7 @@ function saveSessions() {
             metrics: ensureSessionMetrics(session),
             boneDropEnabled: Boolean(session.boneDropEnabled),
             boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds),
-            // Save proxy details
-            proxy_host: session.proxy_host,
-            proxy_port: session.proxy_port
+            schedule: normalizeSchedule(session.schedule)
         };
     }
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(dataToSave, null, 4));
@@ -406,18 +552,27 @@ async function loadSessions() {
                     metrics: normalizeSessionMetrics(s.metrics),
                     boneDropEnabled: Boolean(s.boneDropEnabled),
                     boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(s.boneDropIntervalSeconds),
-                    // Load proxy details
-                    proxy_host: s.proxy_host,
-                    proxy_port: s.proxy_port,
+                    schedule: normalizeSchedule(s.schedule),
                     discordChannel: createSessionChannel(channelId, discordChannel),
                     stopped: false,
                     bot: null,
                     reconnectTimer: null,
                     lastBoneDropError: null,
-                    lastBoneDropErrorAt: 0
+                    lastBoneDropErrorAt: 0,
+                    schedulePaused: false,
+                    highPingHits: 0,
+                    lastHighPingReconnectAt: 0
                 });
                 
-                spawnDynamicBot(channelId);
+                const restoredSession = botSessions.get(channelId);
+                const restoredClock = scheduleClock(restoredSession.schedule.timezone);
+                if (scheduleShouldPause(restoredSession.schedule, restoredClock)) {
+                    restoredSession.schedulePaused = true;
+                    restoredSession.stopped = true;
+                    addDashboardLog(channelId, `Scheduler kept ${restoredSession.username} paused after restart.`);
+                } else {
+                    spawnDynamicBot(channelId);
+                }
                 loadedCount++;
             } catch (err) {
                 console.log(`[Auto-Spawn] Saved session for ${s.username} could not be restored. Removing it from database.`);
@@ -475,45 +630,6 @@ function spawnDynamicBot(channelId) {
         viewDistance: 2
     };
 
-    // ====== PROXY LOGIC ======
-    // If proxy details exist, create a custom connect handler
-    if (session.proxy_host && session.proxy_port) {
-        session.discordChannel.send(`🛡️ Connecting via SOCKS5 proxy: \`${session.proxy_host}:${session.proxy_port}\``).catch(() => {});
-        
-        botOptions.connect = (client) => {
-            const options = {
-                proxy: {
-                    host: session.proxy_host,
-                    port: session.proxy_port,
-                    type: 5 // SOCKS5
-                },
-                command: 'connect',
-                destination: {
-                    host: host,
-                    port: port
-                }
-            };
-
-            SocksClient.createConnection(options, (err, info) => {
-                if (err) {
-                    // Log proxy connection errors to Discord
-                    const errMsg = `🚨 [Proxy Error] **${session.username}** failed to connect to proxy: \`${err.message}\``;
-                    session.discordChannel.send(errMsg).catch(() => {});
-                    logToCentral(errMsg);
-                    
-                    // Force a restart trigger via 'end' event
-                    client.emit('end'); 
-                    return;
-                }
-
-                client.setSocket(info.socket);
-                client.emit('connect');
-            });
-        };
-    }
-    // =========================
-
-    // Create bot with potential proxy settings
     const bot = mineflayer.createBot(botOptions);
 
     session.bot = bot;
@@ -527,6 +643,7 @@ function spawnDynamicBot(channelId) {
     bot.afkInterval = null; 
     bot.lifestealTimer = null;
     bot.sellInterval = null; 
+    bot.scheduleSellInterval = null;
     bot.autoEatInterval = null; 
     bot.boneDropInterval = null;
     bot.boneDropBusy = false;
@@ -649,11 +766,7 @@ function spawnDynamicBot(channelId) {
 
     bot.on('error', (err) => {
         const botName = bot.username || session.username;
-        // Adjust error message if it looks like a proxy error caught by mineflayer
         let errDesc = err.message;
-        if (session.proxy_host && (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT')) {
-            errDesc += ' (Possible proxy issue)';
-        }
         const msg = `🚨 **${botName}** encountered an error: \`${errDesc}\``;
         addDashboardLog(channelId, msg);
         logToCentral(msg);
@@ -698,6 +811,7 @@ function spawnDynamicBot(channelId) {
         if (bot.afkInterval) clearInterval(bot.afkInterval);
         if (bot.lifestealTimer) clearTimeout(bot.lifestealTimer);
         if (bot.sellInterval) clearInterval(bot.sellInterval);
+        if (bot.scheduleSellInterval) clearInterval(bot.scheduleSellInterval);
         if (bot.autoEatInterval) clearInterval(bot.autoEatInterval); 
         if (bot.boneDropInterval) clearInterval(bot.boneDropInterval);
         
@@ -713,13 +827,128 @@ function spawnDynamicBot(channelId) {
     });
 }
 
+function pauseSessionForSchedule(sessionId, session, reason) {
+    if (session.schedulePaused && session.stopped) return;
+    session.schedulePaused = true;
+    session.stopped = true;
+    session.highPingHits = 0;
+    if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
+    session.reconnectTimer = null;
+    clearManagedBotTimers(session.bot);
+    if (session.bot) {
+        try { session.bot.quit(); } catch (error) {}
+    }
+    addDashboardLog(sessionId, `Scheduler paused ${session.username}: ${reason}.`);
+    broadcastDashboardEvent('status', { sessionId, state: 'paused' });
+}
+
+function resumeSessionFromSchedule(sessionId, session) {
+    if (!session.schedulePaused) return;
+    session.schedulePaused = false;
+    session.stopped = false;
+    addDashboardLog(sessionId, `Scheduler resumed ${session.username}.`);
+    if (!session.bot) spawnDynamicBot(sessionId);
+    broadcastDashboardEvent('status', { sessionId, state: 'connecting' });
+}
+
+function updateScheduledSell(sessionId, session, clock) {
+    const bot = session.bot;
+    if (!bot) return;
+    const schedule = session.schedule;
+    const shouldRun = schedule.enabled && schedule.sellWindowEnabled &&
+        isRecurringWindowActive(clock, schedule.days, schedule.sellStartTime, schedule.sellStopTime);
+
+    if (shouldRun && !bot.scheduleSellInterval) {
+        const sell = () => {
+            if (bot?.entity && bot.isAlive && session.bot === bot && !session.schedulePaused) {
+                try { bot.chat('/sell all'); } catch (error) {}
+            }
+        };
+        sell();
+        bot.scheduleSellInterval = setInterval(sell, schedule.sellIntervalSeconds * 1000);
+        addDashboardLog(sessionId, `Scheduler enabled Sell Macro every ${schedule.sellIntervalSeconds} seconds.`);
+    } else if (!shouldRun && bot.scheduleSellInterval) {
+        clearInterval(bot.scheduleSellInterval);
+        bot.scheduleSellInterval = null;
+        addDashboardLog(sessionId, 'Scheduler disabled Sell Macro outside its configured window.');
+    }
+}
+
+function evaluateSessionSchedule(sessionId, session, now = new Date()) {
+    session.schedule = normalizeSchedule(session.schedule);
+    const schedule = session.schedule;
+    const clock = scheduleClock(schedule.timezone, now);
+
+    if (!schedule.enabled) {
+        if (session.schedulePaused) resumeSessionFromSchedule(sessionId, session);
+        if (session.bot?.scheduleSellInterval) {
+            clearInterval(session.bot.scheduleSellInterval);
+            session.bot.scheduleSellInterval = null;
+        }
+        return;
+    }
+
+    const inMaintenance = schedule.maintenanceEnabled && isRecurringWindowActive(
+        clock, schedule.days, schedule.maintenanceStartTime, schedule.maintenanceStopTime);
+    const outsideActiveHours = schedule.activeHoursEnabled && !isRecurringWindowActive(
+        clock, schedule.days, schedule.startTime, schedule.stopTime);
+
+    if (inMaintenance || outsideActiveHours) {
+        pauseSessionForSchedule(sessionId, session, inMaintenance ? 'maintenance window' : 'outside active hours');
+        return;
+    }
+
+    if (session.schedulePaused) resumeSessionFromSchedule(sessionId, session);
+    if (!session.bot?.entity || !session.bot.isAlive) return;
+
+    updateScheduledSell(sessionId, session, clock);
+
+    if (schedule.boneDropScheduleEnabled && schedule.days.includes(clock.day) &&
+        schedule.boneDropTimes.includes(clock.time) && schedule.lastBoneDropRunKey !== `${clock.dateKey}:${clock.time}` &&
+        !session.bot.boneDropBusy) {
+        schedule.lastBoneDropRunKey = `${clock.dateKey}:${clock.time}`;
+        saveSessions();
+        addDashboardLog(sessionId, `Scheduler started Bone Drop at ${clock.time}.`);
+        runBoneDropCycle(session.bot)
+            .then(result => {
+                recordBoneDropResult(session, result);
+                addDashboardLog(sessionId, `Scheduled Bone Drop finished after ${result.dropActions} Drop Loot click(s).`);
+            })
+            .catch(error => reportBoneDropProblem(session, error));
+    }
+
+    if (schedule.highPingEnabled) {
+        const ping = session.bot.player?.ping;
+        session.highPingHits = Number.isFinite(ping) && ping > schedule.highPingThreshold
+            ? (session.highPingHits || 0) + 1
+            : 0;
+        if (session.highPingHits >= 3 && Date.now() - (session.lastHighPingReconnectAt || 0) >= 120000) {
+            session.highPingHits = 0;
+            session.lastHighPingReconnectAt = Date.now();
+            addDashboardLog(sessionId, `Ping remained above ${schedule.highPingThreshold} ms. Reconnecting.`);
+            try { session.bot.quit(); } catch (error) {}
+        }
+    } else {
+        session.highPingHits = 0;
+    }
+}
+
+const scheduleEngine = setInterval(() => {
+    for (const [sessionId, session] of botSessions.entries()) {
+        try { evaluateSessionSchedule(sessionId, session); } catch (error) {
+            addDashboardLog(sessionId, `Scheduler error: ${error.message}`);
+        }
+    }
+}, 15000);
+scheduleEngine.unref();
+
 // ==========================================
 // 3. Discord Bot Logic
 // ==========================================
 
 discordClient.once('clientReady', async () => {
     console.log(`Logged in to Discord as ${discordClient.user.tag}`);
-    console.log('Use /spawn <username> <ip> <password> <auth> [proxy_host:port] to begin.');
+    console.log('Use /spawn <username> <ip> <password> <auth> to begin.');
     
     await loadSessions();
 });
@@ -735,27 +964,9 @@ discordClient.on('messageCreate', async (message) => {
         const server_ip = args[2];
         const password = args[3];
         const authType = args[4] || 'offline'; 
-        const proxyArg = args[5]; // Optional argument
 
         if (!username || !server_ip || !password) {
-            return message.reply("❌ **Invalid Format.** Use: `/spawn <username> <server_ip> <password> <auth> [proxy_host:port]`").catch(() => {});
-        }
-
-        // Parse Proxy Argument if exists
-        let proxy_host = null;
-        let proxy_port = null;
-        if (proxyArg) {
-            if (proxyArg.includes(':')) {
-                const proxyParts = proxyArg.split(':');
-                proxy_host = proxyParts[0];
-                proxy_port = parseInt(proxyParts[1], 10);
-                
-                if (isNaN(proxy_port)) {
-                    return message.reply("❌ **Invalid Proxy Port.** Format must be `host:port`").catch(() => {});
-                }
-            } else {
-                return message.reply("❌ **Invalid Proxy Format.** Use `host:port`").catch(() => {});
-            }
+            return message.reply("❌ **Invalid Format.** Use: `/spawn <username> <server_ip> <password> <auth>`").catch(() => {});
         }
 
         const existingSession = Array.from(botSessions.values()).find(s => s.username.toLowerCase() === username.toLowerCase());
@@ -799,15 +1010,16 @@ discordClient.on('messageCreate', async (message) => {
                 metrics: normalizeSessionMetrics(),
                 boneDropEnabled: false,
                 boneDropIntervalSeconds: DEFAULT_BONE_DROP_INTERVAL_SECONDS,
-                // Store proxy details in session
-                proxy_host: proxy_host,
-                proxy_port: proxy_port,
+                schedule: normalizeSchedule(),
                 discordChannel: createSessionChannel(newChannel.id, newChannel),
                 stopped: false,
                 bot: null,
                 reconnectTimer: null,
                 lastBoneDropError: null,
-                lastBoneDropErrorAt: 0
+                lastBoneDropErrorAt: 0,
+                schedulePaused: false,
+                highPingHits: 0,
+                lastHighPingReconnectAt: 0
             });
 
             saveSessions();
@@ -855,18 +1067,26 @@ discordClient.on('messageCreate', async (message) => {
                         metrics: normalizeSessionMetrics(sessionData.metrics),
                         boneDropEnabled: Boolean(sessionData.boneDropEnabled),
                         boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(sessionData.boneDropIntervalSeconds),
-                        // Load proxy details on !spawnall
-                        proxy_host: sessionData.proxy_host,
-                        proxy_port: sessionData.proxy_port,
+                        schedule: normalizeSchedule(sessionData.schedule),
                         discordChannel: channel,
                         stopped: false,
                         bot: null,
                         reconnectTimer: null,
                         lastBoneDropError: null,
-                        lastBoneDropErrorAt: 0
+                        lastBoneDropErrorAt: 0,
+                        schedulePaused: false,
+                        highPingHits: 0,
+                        lastHighPingReconnectAt: 0
                     });
-                    spawnDynamicBot(channelId);
-                    spawnedCount++;
+                    const restoredSession = botSessions.get(channelId);
+                    const restoredClock = scheduleClock(restoredSession.schedule.timezone);
+                    if (scheduleShouldPause(restoredSession.schedule, restoredClock)) {
+                        restoredSession.schedulePaused = true;
+                        restoredSession.stopped = true;
+                    } else {
+                        spawnDynamicBot(channelId);
+                        spawnedCount++;
+                    }
                 }
             }
 
@@ -1112,19 +1332,6 @@ function readJsonBody(request) {
     });
 }
 
-function parseProxyAddress(value) {
-    const proxy = String(value || '').trim();
-    if (!proxy || proxy === '-') return { proxy_host: null, proxy_port: null };
-    const separator = proxy.lastIndexOf(':');
-    if (separator <= 0) throw new Error('Proxy must use host:port format.');
-    const proxy_host = proxy.slice(0, separator).replace(/^\[|\]$/g, '');
-    const proxy_port = Number.parseInt(proxy.slice(separator + 1), 10);
-    if (!proxy_host || !Number.isInteger(proxy_port) || proxy_port < 1 || proxy_port > 65535) {
-        throw new Error('Proxy must contain a valid host and port.');
-    }
-    return { proxy_host, proxy_port };
-}
-
 function dashboardInventory(bot) {
     if (!bot?.inventory) return [];
     try {
@@ -1150,7 +1357,8 @@ function dashboardBotSummary(id, session) {
     const spawned = Boolean(bot?.entity);
     const position = bot?.entity?.position;
     let state = 'reconnecting';
-    if (session.stopped) state = 'stopped';
+    if (session.schedulePaused) state = 'paused';
+    else if (session.stopped) state = 'stopped';
     else if (spawned) state = 'online';
     else if (bot) state = 'connecting';
 
@@ -1160,7 +1368,6 @@ function dashboardBotSummary(id, session) {
         username: session.username,
         server: session.server_ip,
         authType: session.authType,
-        proxy: session.proxy_host ? `${session.proxy_host}:${session.proxy_port}` : null,
         state,
         health: Number.isFinite(bot?.health) ? Math.round(bot.health * 10) / 10 : null,
         food: Number.isFinite(bot?.food) ? bot.food : null,
@@ -1175,11 +1382,13 @@ function dashboardBotSummary(id, session) {
             boneDrop: Boolean(session.boneDropEnabled && bot?.boneDropInterval),
             boneDropBusy: Boolean(bot?.boneDropBusy),
             boneDropCooldown: normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds),
-            sell: Boolean(bot?.sellInterval),
+            sell: Boolean(bot?.sellInterval || bot?.scheduleSellInterval),
             autoEat: Boolean(bot?.autoEatInterval)
         },
         metrics: ensureSessionMetrics(session),
         inventory: dashboardInventory(bot),
+        schedule: normalizeSchedule(session.schedule),
+        nextScheduledAction: nextScheduledAction(normalizeSchedule(session.schedule)),
         logs: dashboardLogs.get(id) || []
     };
 }
@@ -1203,7 +1412,6 @@ function createDashboardBot(payload) {
         session.username.toLowerCase() === username.toLowerCase());
     if (existing) throw new Error(`${username} is already managed.`);
 
-    const { proxy_host, proxy_port } = parseProxyAddress(payload.proxy);
     const id = `web-${username.toLowerCase()}-${crypto.randomUUID().slice(0, 8)}`;
     botSessions.set(id, {
         source: 'dashboard',
@@ -1214,14 +1422,16 @@ function createDashboardBot(payload) {
         metrics: normalizeSessionMetrics(),
         boneDropEnabled: false,
         boneDropIntervalSeconds: DEFAULT_BONE_DROP_INTERVAL_SECONDS,
-        proxy_host,
-        proxy_port,
+        schedule: normalizeSchedule(),
         discordChannel: createSessionChannel(id),
         stopped: false,
         bot: null,
         reconnectTimer: null,
         lastBoneDropError: null,
-        lastBoneDropErrorAt: 0
+        lastBoneDropErrorAt: 0,
+        schedulePaused: false,
+        highPingHits: 0,
+        lastHighPingReconnectAt: 0
     });
     addDashboardLog(id, `Dashboard created ${username} for ${server_ip}.`);
     saveSessions();
@@ -1234,6 +1444,7 @@ function clearManagedBotTimers(bot) {
     if (bot.afkInterval) clearInterval(bot.afkInterval);
     if (bot.lifestealTimer) clearTimeout(bot.lifestealTimer);
     if (bot.sellInterval) clearInterval(bot.sellInterval);
+    if (bot.scheduleSellInterval) clearInterval(bot.scheduleSellInterval);
     if (bot.autoEatInterval) clearInterval(bot.autoEatInterval);
     if (bot.boneDropInterval) clearInterval(bot.boneDropInterval);
 }
@@ -1281,6 +1492,9 @@ async function runDashboardAction(id, payload) {
     }
 
     if (action === 'reconnect') {
+        if (session.schedulePaused) {
+            throw new Error('This bot is paused by its schedule. Change or disable the schedule first.');
+        }
         session.stopped = false;
         if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
         if (bot) {
@@ -1289,6 +1503,18 @@ async function runDashboardAction(id, payload) {
             spawnDynamicBot(id);
         }
         return { message: `${session.username} is reconnecting.` };
+    }
+
+    if (action === 'schedule-save') {
+        session.schedule = normalizeSchedule(payload.schedule);
+        saveSessions();
+        evaluateSessionSchedule(id, session);
+        const next = nextScheduledAction(session.schedule);
+        return {
+            message: session.schedule.enabled
+                ? `Schedule saved.${next ? ` Next: ${next.label} ${next.when}.` : ''}`
+                : 'Schedule disabled.'
+        };
     }
 
     if (!bot) throw new Error('The bot is currently disconnected. Try reconnecting it first.');

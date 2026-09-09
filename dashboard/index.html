@@ -126,9 +126,6 @@
                         <option value="microsoft">Microsoft</option>
                     </select>
                 </label>
-                <label class="span-two">SOCKS5 proxy <span class="optional">optional</span>
-                    <input name="proxy" placeholder="127.0.0.1:1080">
-                </label>
             </div>
             <p id="createError" class="form-message error" role="alert"></p>
             <div class="modal-actions">
@@ -189,6 +186,78 @@
                         <button data-action="autoeat-off" class="danger-text small-button" type="button">Disable</button>
                     </div>
                 </article>
+            </section>
+
+            <section class="control-section schedule-panel">
+                <form id="scheduleForm">
+                    <div class="schedule-title">
+                        <div>
+                            <h3>Automation schedule</h3>
+                            <p class="muted">Times use your selected timezone and are saved separately for this account.</p>
+                        </div>
+                        <label class="switch-label"><input id="scheduleEnabled" type="checkbox"> Enabled</label>
+                    </div>
+                    <input id="scheduleTimezone" type="hidden">
+                    <div class="next-action-card">
+                        <span>NEXT SCHEDULED ACTION</span>
+                        <strong id="nextScheduledAction">No action scheduled</strong>
+                        <small id="scheduleTimezoneLabel" class="muted"></small>
+                    </div>
+
+                    <fieldset class="schedule-days">
+                        <legend>Active days</legend>
+                        <label><input type="checkbox" name="scheduleDay" value="1"> Mon</label>
+                        <label><input type="checkbox" name="scheduleDay" value="2"> Tue</label>
+                        <label><input type="checkbox" name="scheduleDay" value="3"> Wed</label>
+                        <label><input type="checkbox" name="scheduleDay" value="4"> Thu</label>
+                        <label><input type="checkbox" name="scheduleDay" value="5"> Fri</label>
+                        <label><input type="checkbox" name="scheduleDay" value="6"> Sat</label>
+                        <label><input type="checkbox" name="scheduleDay" value="0"> Sun</label>
+                    </fieldset>
+
+                    <div class="schedule-rules">
+                        <article class="schedule-rule">
+                            <label class="rule-toggle"><input id="activeHoursEnabled" type="checkbox"> Bot active hours</label>
+                            <div class="time-pair">
+                                <label>Start<input id="scheduleStartTime" type="time" value="06:00"></label>
+                                <label>Stop<input id="scheduleStopTime" type="time" value="23:00"></label>
+                            </div>
+                            <p>Outside this window, the bot disconnects without deleting its account.</p>
+                        </article>
+
+                        <article class="schedule-rule">
+                            <label class="rule-toggle"><input id="boneDropScheduleEnabled" type="checkbox"> Scheduled Bone Drop</label>
+                            <label>Run times<input id="boneDropTimes" placeholder="09:00, 13:30, 20:00"></label>
+                            <p>Use 24-hour times separated by commas.</p>
+                        </article>
+
+                        <article class="schedule-rule">
+                            <label class="rule-toggle"><input id="sellWindowEnabled" type="checkbox"> Sell Macro window</label>
+                            <div class="time-pair three">
+                                <label>Start<input id="sellStartTime" type="time" value="06:00"></label>
+                                <label>Stop<input id="sellStopTime" type="time" value="23:00"></label>
+                                <label>Every<input id="scheduledSellSeconds" type="number" min="1" max="86400" value="30"></label>
+                            </div>
+                        </article>
+
+                        <article class="schedule-rule">
+                            <label class="rule-toggle"><input id="maintenanceEnabled" type="checkbox"> Maintenance pause</label>
+                            <div class="time-pair">
+                                <label>Pause at<input id="maintenanceStartTime" type="time" value="03:00"></label>
+                                <label>Resume at<input id="maintenanceStopTime" type="time" value="04:00"></label>
+                            </div>
+                        </article>
+
+                        <article class="schedule-rule wide-rule">
+                            <label class="rule-toggle"><input id="highPingEnabled" type="checkbox"> Reconnect after sustained high ping</label>
+                            <label>Ping limit (ms)<input id="highPingThreshold" type="number" min="50" max="5000" value="500"></label>
+                            <p>The bot reconnects only after three consecutive high readings, with a two-minute safety cooldown.</p>
+                        </article>
+                    </div>
+                    <div class="schedule-actions">
+                        <button class="primary" type="submit">Save schedule</button>
+                    </div>
+                </form>
             </section>
 
             <section class="control-section">

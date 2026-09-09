@@ -9,10 +9,10 @@ A multi-account AFK bot for supported Minecraft Java servers, controlled through
 *   **Auto-Authentication:** Automatically detects login prompts and handles `/register` or `/login` commands (AuthMe support).
 *   **Multi-Version Connections:** Automatically detects supported Minecraft Java versions (currently 1.8.8 through 1.21.11), with an optional fixed-version override.
 *   **Optional Network Navigation:** Saves a different post-login command for each bot instead of forcing a specific hub or game mode.
-*   **SOCKS5 Support:** Supports direct servers, custom ports, IPv6 address syntax, and Minecraft DNS SRV records when connecting through a proxy.
 *   **Custom Anti-AFK:** Periodically shifts camera angles, sneaks, and swings arms to mimic real player behavior.
 *   **Auto-Reconnect:** Gracefully handles unexpected server kicks or Wi-Fi drops and automatically reconnects when the network is restored.
 *   **Skeleton Bone Drop:** Keeps the loot menu open, repeatedly uses Drop Loot as the menu refreshes, then clicks Sell All once when arrows appear. Its cooldown is configurable per bot.
+*   **Per-Account Scheduling:** Gives every account its own active hours, Bone Drop times, Sell Macro window, maintenance pause, and high-ping reconnect rule.
 
 ---
 
@@ -66,7 +66,7 @@ http://187.127.150.191:25567
 
 Sign in with `DASHBOARD_PASSWORD`. From the dashboard you can:
 
-* Add offline/cracked or Microsoft-authenticated accounts, with an optional SOCKS5 proxy.
+* Add offline/cracked or Microsoft-authenticated accounts.
 * View connection status, health, hunger, position, active macros, and recent activity.
 * Watch activity update live and inspect each account's current inventory.
 * Select multiple bots and apply reconnect or macro controls to the whole group.
@@ -74,6 +74,7 @@ Sign in with `DASHBOARD_PASSWORD`. From the dashboard you can:
 * Send Minecraft commands or chat messages.
 * Enable or disable Bone Drop, Sell Macro, and Auto-Eat.
 * Run Bone Drop immediately, reconnect a bot, or remove its saved session.
+* Configure separate schedules for every account and see the next scheduled action.
 
 If `DASHBOARD_PASSWORD` is missing, the app creates a temporary password and prints it in the hosting console. It changes after every restart, so setting the environment variable is recommended. Because the provided address uses plain HTTP, use a unique dashboard password that you do not use anywhere else. HTTPS through a domain or secure tunnel is recommended for access over the public internet.
 
@@ -86,7 +87,7 @@ Once the bot is running, you control it entirely through Discord.
 Type the following command in any channel your Discord bot can read:
 
 ```text
-/spawn <username> <server[:port]> <password|-> [offline|microsoft] [proxy[:port]|-] [version|auto]
+/spawn <username> <server[:port]> <password|-> [offline|microsoft]
 ```
 
 username: The Minecraft username for the bot.
@@ -97,16 +98,12 @@ password: The cracked-server password. Use `-` if that server has no `/login` pl
 
 auth: Use `offline` for cracked servers or `microsoft` for premium accounts. The default is `offline`.
 
-proxy: Optional SOCKS5 proxy. Use `-` for no proxy. A proxy without an explicit port defaults to `1080`.
-
-version: Optional fixed Minecraft version, such as `1.20.4`. Use `auto` or omit it to detect the version from the server.
-
 Example:
 
 ```text
 /spawn IAMCRAFTY1 play.example.com MySecretPass offline
-/spawn IAMCRAFTY2 play.example.com:25566 MySecretPass offline 203.0.113.20:1080 auto
-/spawn PremiumName play.example.com - microsoft - auto
+/spawn IAMCRAFTY2 play.example.com:25566 MySecretPass offline
+/spawn PremiumName play.example.com - microsoft
 ```
 
 The bot will automatically create a private Discord channel named #bot-iamcrafty1 where it will stream the game chat and events.
@@ -119,17 +116,7 @@ Chat: Type any standard message to have the bot say it in-game.
 
 Commands: Type any command (e.g., /server survival, /balance) to execute it in-game.
 
-For a network that first places the bot in a hub, configure the destination command inside the bot's private Discord channel:
-
-```text
-!joincmd set /server survival
-!joincmd status
-!joincmd off
-```
-
-The setting is saved per bot and runs after future reconnects. Standalone servers need no join command. Manual `/server ...` commands still work.
-
-Use `!serverinfo` to show the configured address, detected protocol version, authentication mode, proxy, and join command.
+Minecraft commands beginning with `/` can be sent directly from the account's Discord channel.
 
 ### Compatibility limits
 
@@ -156,6 +143,18 @@ Examples:
 ```
 
 Run `!bonedrop now` first. If it reports that no spawner was found, move the bot closer and retry. Make sure this automation is permitted by the Minecraft server's rules.
+
+### Per-Account Automation Schedules
+
+Open an account with **Manage**, then use **Automation schedule**. Each account stores its own settings:
+
+* **Bot active hours** connects at the start time and pauses at the stop time.
+* **Scheduled Bone Drop** accepts one or more 24-hour times separated by commas, such as `09:00, 14:30, 21:00`.
+* **Sell Macro window** runs `/sell all` at the selected interval only during that window.
+* **Maintenance pause** disconnects the account during planned downtime.
+* **High-ping reconnect** reconnects after three consecutive high readings and has a two-minute safety cooldown.
+
+Select the days that each rule applies to, then save the schedule. Times use the time zone displayed in the schedule panel. Start/stop and maintenance windows can cross midnight. The account card and control panel show the next scheduled action.
 
 ### Stopping a Bot
 
