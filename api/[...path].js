@@ -27,6 +27,8 @@ module.exports = async function handler(request, response) {
     const headers = { Accept: request.headers.accept || 'application/json' };
     if (request.headers.cookie) headers.Cookie = request.headers.cookie;
     if (request.headers['content-type']) headers['Content-Type'] = request.headers['content-type'];
+    if (request.headers['x-dashboard-activity']) headers['X-Dashboard-Activity'] = request.headers['x-dashboard-activity'];
+    headers['X-Forwarded-Proto'] = String(request.headers['x-forwarded-proto'] || 'https');
 
     let body;
     if (!['GET', 'HEAD'].includes(request.method)) {

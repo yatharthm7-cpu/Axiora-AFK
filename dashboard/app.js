@@ -17,6 +17,14 @@ let toastTimer = null;
 let eventStream = null;
 let liveRefreshTimer = null;
 let scheduleDirty = false;
+let connectionDirty = false;
+let currentUser = null;
+let lastAuditRefresh = 0;
+let lastUserActivityAt = Date.now();
+
+for (const eventName of ['pointerdown', 'keydown', 'touchstart']) {
+    window.addEventListener(eventName, () => { lastUserActivityAt = Date.now(); }, { passive: true });
+}
 
 function browserTimezone() {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata';
@@ -47,7 +55,11 @@ function defaultSchedule() {
 async function api(url, options = {}) {
     const response = await fetch(url, {
         ...options,
-        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+        headers: {
+            'Content-Type': 'application/json',
+            'X-Dashboard-Activity': Date.now() - lastUserActivityAt < 60000 ? '1' : '0',
+            ...(options.headers || {})
+        }
     });
     const data = await response.json().catch(() => ({}));
     if (response.status === 401 && url !== '/api/login') showLogin();
@@ -62,6 +74,8 @@ function showLogin() {
     refreshTimer = null;
     if (eventStream) eventStream.close();
     eventStream = null;
+    currentUser = null;
+    document.body.classList.remove('viewer');
 }
 
 function showDashboard() {
@@ -109,10 +123,23 @@ function formatLogTime(value) {
     return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+function formatMoney(value) {
+    return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(Number(value) || 0);
+}
+
+function applyCurrentUser(user) {
+    currentUser = user || null;
+    document.body.classList.toggle('viewer', currentUser?.role === 'viewer');
+    document.querySelector('#currentUser').textContent = currentUser
+        ? `${currentUser.username} · ${currentUser.role}`
+        : '';
+}
+
 function botCard(bot) {
     const position = bot.position ? `${bot.position.x}, ${bot.position.y}, ${bot.position.z}` : '—';
     const health = bot.health == null ? '—' : `${bot.health}/20`;
     const food = bot.food == null ? '—' : `${bot.food}/20`;
+    const ping = bot.ping == null ? '—' : `${bot.ping} ms`;
     const tags = [
         ['Bone Drop', bot.macros.boneDrop],
         ['Sell Macro', bot.macros.sell],
@@ -132,7 +159,7 @@ function botCard(bot) {
                     <div class="avatar">${escapeHtml(bot.username.slice(0, 1).toUpperCase())}</div>
                     <div>
                         <h3>${escapeHtml(bot.username)}</h3>
-                        <p class="muted">${escapeHtml(bot.server)}</p>
+                        <p class="muted">${escapeHtml(bot.server)} · ${escapeHtml(bot.version?.detected || bot.version?.requested || 'auto')}</p>
                     </div>
                 </div>
                 <span class="status-pill ${escapeHtml(bot.state)}">${escapeHtml(bot.state)}</span>
@@ -141,8 +168,10 @@ function botCard(bot) {
                 <div class="stat"><span>HEALTH</span><strong>${health}</strong></div>
                 <div class="stat"><span>FOOD</span><strong>${food}</strong></div>
                 <div class="stat"><span>POSITION</span><strong>${position}</strong></div>
+                <div class="stat"><span>PING</span><strong>${ping}</strong></div>
             </div>
             <div class="macro-tags">${tags}</div>
+            <div class="connection-line">${bot.proxy?.enabled ? `SOCKS5 · ${escapeHtml(bot.proxy.address)}` : 'Direct connection'} · 24h uptime ${escapeHtml(bot.statistics?.uptimeDay ?? 0)}%</div>
             <div class="next-chip"><span>NEXT</span>${escapeHtml(nextAction)}</div>
             <div class="card-actions">
                 <span class="source-label">${escapeHtml(bot.source)} control</span>
@@ -153,6 +182,7 @@ function botCard(bot) {
 
 function renderStatus(data) {
     bots = data.bots;
+    applyCurrentUser(data.user);
     const currentIds = new Set(bots.map(bot => bot.id));
     for (const id of selectedBots) if (!currentIds.has(id)) selectedBots.delete(id);
     document.querySelector('#totalBots').textContent = bots.length;
@@ -160,6 +190,8 @@ function renderStatus(data) {
     document.querySelector('#uptime').textContent = formatUptime(data.uptime);
     document.querySelector('#activeMacros').textContent = bots.reduce((total, bot) =>
         total + Number(bot.macros.boneDrop) + Number(bot.macros.sell) + Number(bot.macros.autoEat), 0);
+    document.querySelector('#memoryUsage').textContent = `${data.performance?.memoryMb || 0} MB`;
+    document.querySelector('#cpuUsage').textContent = `${data.performance?.cpuPercent || 0}%`;
     document.querySelector('#lastUpdated').textContent = `Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
     document.querySelector('#discordState').classList.toggle('online', data.discord);
     if (data.liveEvents !== false) {
@@ -199,6 +231,7 @@ async function refreshStatus() {
     try {
         renderStatus(await api('/api/status'));
         showDashboard();
+        if (Date.now() - lastAuditRefresh > 15000) refreshAudit();
     } catch (error) {
         if (!dashboardView.classList.contains('hidden')) showToast(error.message, true);
     }
@@ -207,6 +240,7 @@ async function refreshStatus() {
 function openControls(id) {
     selectedBotId = id;
     scheduleDirty = false;
+    connectionDirty = false;
     updateControlDialog();
     controlDialog.showModal();
     updateControlDialog();
@@ -239,6 +273,43 @@ function populateScheduleForm(bot) {
     });
 }
 
+function populateConnectionForm(bot) {
+    document.querySelector('#connectionVersion').value = bot.version?.requested || 'auto';
+    document.querySelector('#detectedVersion').textContent = bot.version?.detected
+        ? `Detected ${bot.version.detected}`
+        : 'Detects automatically on connect';
+    document.querySelector('#connectionProxyEnabled').checked = Boolean(bot.proxy?.enabled);
+    document.querySelector('#connectionProxyHost').value = bot.proxy?.host || '';
+    document.querySelector('#connectionProxyPort').value = bot.proxy?.port || '';
+    document.querySelector('#connectionProxyUsername').value = bot.proxy?.username || '';
+    document.querySelector('#connectionProxyPassword').value = '';
+}
+
+function renderPingChart(samples = []) {
+    const chart = document.querySelector('#pingChart');
+    const values = samples.map(sample => Number(sample.ping)).filter(Number.isFinite);
+    if (!values.length) {
+        chart.innerHTML = '<text x="300" y="70" text-anchor="middle">Ping history will appear after monitoring begins.</text>';
+        document.querySelector('#pingRange').textContent = '';
+        return;
+    }
+    const width = 600;
+    const height = 130;
+    const padding = 12;
+    const maximum = Math.max(100, ...values);
+    const minimum = Math.min(...values);
+    const points = values.map((value, index) => {
+        const x = values.length === 1 ? width / 2 : index / (values.length - 1) * width;
+        const y = height - padding - value / maximum * (height - padding * 2);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    chart.innerHTML = `
+        <line x1="0" y1="${height - padding}" x2="${width}" y2="${height - padding}" class="chart-axis"></line>
+        <polyline points="${points}" class="chart-line"></polyline>
+    `;
+    document.querySelector('#pingRange').textContent = `${minimum}–${Math.max(...values)} ms · ${values.length} samples`;
+}
+
 function updateControlDialog() {
     if (!selectedBotId || !controlDialog.open) return;
     const bot = bots.find(item => item.id === selectedBotId);
@@ -256,12 +327,20 @@ function updateControlDialog() {
     document.querySelector('#eatStatus').textContent = bot.macros.autoEat ? 'Enabled' : 'Stopped';
     document.querySelector('#boneSeconds').value = bot.macros.boneDropCooldown;
     const metrics = bot.metrics || {};
+    const statistics = bot.statistics || {};
     document.querySelector('#detailUptime').textContent = bot.state === 'online' ? formatUptime(bot.onlineSeconds || 0) : '—';
+    document.querySelector('#detailPing').textContent = bot.ping == null ? '—' : `${bot.ping} ms`;
+    document.querySelector('#detailUptimeDay').textContent = `${statistics.uptimeDay ?? 0}%`;
+    document.querySelector('#detailUptimeWeek').textContent = `${statistics.uptimeWeek ?? 0}%`;
     document.querySelector('#detailConnections').textContent = metrics.connections || 0;
     document.querySelector('#detailDisconnects').textContent = metrics.disconnects || 0;
     document.querySelector('#detailDeaths').textContent = metrics.deaths || 0;
     document.querySelector('#detailDropClicks').textContent = metrics.boneDropClicks || 0;
+    document.querySelector('#detailDropSuccess').textContent = statistics.boneDropSuccessRate == null ? '—' : `${statistics.boneDropSuccessRate}%`;
+    document.querySelector('#detailEarnings').textContent = formatMoney(statistics.estimatedEarnings);
+    renderPingChart(statistics.pingHistory || []);
     if (!scheduleDirty) populateScheduleForm(bot);
+    if (!connectionDirty) populateConnectionForm(bot);
 
     const inventory = document.querySelector('#inventoryGrid');
     const inventoryItems = bot.inventory || [];
@@ -299,10 +378,47 @@ async function performAction(action, values = {}) {
             selectedBotId = null;
         }
         if (action === 'schedule-save') scheduleDirty = false;
+        if (action === 'connection-save') connectionDirty = false;
         await refreshStatus();
     } catch (error) {
         message.textContent = error.message;
         message.classList.add('error');
+        showToast(error.message, true);
+    }
+}
+
+async function refreshAudit() {
+    try {
+        const data = await api('/api/audit');
+        lastAuditRefresh = Date.now();
+        const container = document.querySelector('#auditLog');
+        container.innerHTML = data.entries?.length
+            ? data.entries.map(entry => `
+                <div class="audit-entry">
+                    <time>${escapeHtml(formatLogTime(entry.time))}</time>
+                    <strong>${escapeHtml(entry.actor)}</strong>
+                    <span>${escapeHtml(entry.action)}</span>
+                    <small>${escapeHtml(entry.target || '')}</small>
+                </div>`).join('')
+            : '<p class="muted">No audit activity yet.</p>';
+    } catch (error) {
+        if (error.message !== 'Log in to use the dashboard.') showToast(error.message, true);
+    }
+}
+
+async function exportSettings() {
+    try {
+        const data = await api('/api/export');
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `craftcontrol-settings-${new Date().toISOString().slice(0, 10)}.json`;
+        link.click();
+        URL.revokeObjectURL(url);
+        showToast('Settings backup downloaded. Passwords were not included.');
+        refreshAudit();
+    } catch (error) {
         showToast(error.message, true);
     }
 }
@@ -313,9 +429,12 @@ loginForm.addEventListener('submit', async event => {
     try {
         await api('/api/login', {
             method: 'POST',
-            body: JSON.stringify({ password: document.querySelector('#loginPassword').value })
+            body: JSON.stringify({
+                username: document.querySelector('#loginUsername').value,
+                password: document.querySelector('#loginPassword').value
+            })
         });
-        loginForm.reset();
+        document.querySelector('#loginPassword').value = '';
         await refreshStatus();
     } catch (error) {
         loginError.textContent = error.message;
@@ -328,6 +447,40 @@ document.querySelector('#logoutButton').addEventListener('click', async () => {
 });
 
 document.querySelector('#refreshButton').addEventListener('click', refreshStatus);
+document.querySelector('#refreshAuditButton').addEventListener('click', refreshAudit);
+document.querySelector('#exportButton').addEventListener('click', exportSettings);
+document.querySelector('#importButton').addEventListener('click', () => document.querySelector('#importFile').click());
+document.querySelector('#importFile').addEventListener('change', async event => {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+    try {
+        const backup = JSON.parse(await file.text());
+        if (!window.confirm('Import this backup into matching accounts? Passwords and running connections will not be changed.')) return;
+        const result = await api('/api/import', { method: 'POST', body: JSON.stringify(backup) });
+        showToast(result.message);
+        await refreshStatus();
+        refreshAudit();
+    } catch (error) {
+        showToast(error.message || 'The backup file is invalid.', true);
+    } finally {
+        event.currentTarget.value = '';
+    }
+});
+document.querySelector('#emergencyButton').addEventListener('click', async () => {
+    const confirmation = window.prompt('This immediately disconnects every bot and stops every macro. Type STOP ALL to continue.');
+    if (confirmation !== 'STOP ALL') return showToast('Emergency Stop cancelled.', true);
+    try {
+        const result = await api('/api/emergency-stop', {
+            method: 'POST',
+            body: JSON.stringify({ confirmation })
+        });
+        showToast(result.message);
+        await refreshStatus();
+        refreshAudit();
+    } catch (error) {
+        showToast(error.message, true);
+    }
+});
 document.querySelector('#showCreateButton').addEventListener('click', () => createDialog.showModal());
 document.querySelectorAll('.create-trigger').forEach(button => button.addEventListener('click', () => createDialog.showModal()));
 document.querySelector('#closeCreateButton').addEventListener('click', () => createDialog.close());
@@ -336,6 +489,30 @@ document.querySelector('#closeControlButton').addEventListener('click', () => co
 
 document.querySelector('#scheduleForm').addEventListener('input', () => {
     scheduleDirty = true;
+});
+
+document.querySelector('#connectionForm').addEventListener('input', () => {
+    connectionDirty = true;
+});
+
+document.querySelector('#connectionForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const proxyEnabled = document.querySelector('#connectionProxyEnabled').checked;
+    const proxyHost = document.querySelector('#connectionProxyHost').value.trim();
+    const proxyPort = document.querySelector('#connectionProxyPort').value;
+    if (proxyEnabled && (!proxyHost || !proxyPort)) {
+        return showToast('Enter both the proxy host and port.', true);
+    }
+    await performAction('connection-save', {
+        version: document.querySelector('#connectionVersion').value,
+        proxyEnabled,
+        proxyHost,
+        proxyPort,
+        proxyUsername: document.querySelector('#connectionProxyUsername').value,
+        proxyPassword: document.querySelector('#connectionProxyPassword').value,
+        reconnect: true
+    });
+    connectionDirty = false;
 });
 
 document.querySelector('#scheduleForm').addEventListener('submit', async event => {
@@ -401,6 +578,7 @@ document.querySelector('#bulkAction').addEventListener('change', updateBulkSecon
 document.querySelector('#runBulkAction').addEventListener('click', async () => {
     if (!selectedBots.size) return showToast('Select at least one bot first.', true);
     const action = document.querySelector('#bulkAction').value;
+    if (action === 'stop' && !window.confirm(`Stop ${selectedBots.size} selected bot(s)? Their saved accounts will remain available.`)) return;
     const payload = { action, ids: [...selectedBots] };
     if (action === 'bonedrop-on' || action === 'sell-on') {
         payload.seconds = document.querySelector('#bulkSeconds').value;
@@ -446,6 +624,7 @@ document.querySelectorAll('#controlDialog [data-action]').forEach(button => {
     button.addEventListener('click', async () => {
         const action = button.dataset.action;
         if (action === 'remove' && !window.confirm('Remove this bot and its saved session? Its Discord channel will also be removed if it has one.')) return;
+        if (action === 'stop' && !window.confirm('Stop this bot? Its saved account will remain available.')) return;
         const values = {};
         if (action === 'bonedrop-on') values.seconds = document.querySelector('#boneSeconds').value;
         if (action === 'sell-on') values.seconds = document.querySelector('#sellSeconds').value;
