@@ -1,5 +1,3 @@
-const DEFAULT_BACKEND_URL = 'http://187.127.150.191:25567';
-
 module.exports = async function handler(request, response) {
     const queryPath = request.query?.path;
     const pathParts = Array.isArray(queryPath) ? queryPath : [queryPath].filter(Boolean);
@@ -22,7 +20,12 @@ module.exports = async function handler(request, response) {
     // serverless request.
     if (apiPath === 'events') return response.status(204).end();
 
-    const backendBase = String(process.env.BOT_BACKEND_URL || DEFAULT_BACKEND_URL).replace(/\/$/, '');
+    const backendBase = String(process.env.BOT_BACKEND_URL || '').replace(/\/$/, '');
+    if (!backendBase) {
+        return response.status(503).json({
+            error: 'This deployment has no public bot backend. Open http://localhost:25567 on the computer running PM2.'
+        });
+    }
     const targetUrl = `${backendBase}/api/${apiPath}`;
     const headers = { Accept: request.headers.accept || 'application/json' };
     if (request.headers.cookie) headers.Cookie = request.headers.cookie;

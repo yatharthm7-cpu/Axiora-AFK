@@ -43,6 +43,7 @@ Create a file named .env in the root directory of your project and add your Disc
 DISCORD_TOKEN=your_discord_bot_token_here
 DASHBOARD_PASSWORD=use-a-long-unique-password
 DASHBOARD_PORT=25567
+DASHBOARD_HOST=127.0.0.1
 ```
 
 On hosts that provide `SERVER_PORT` or `PORT` automatically, that assigned port is used for the dashboard. The server listens on all network interfaces by default.
@@ -61,7 +62,7 @@ Invite the bot to your Discord server.
 After the app starts, open:
 
 ```text
-http://187.127.150.191:25567
+http://localhost:25567
 ```
 
 Sign in with `DASHBOARD_PASSWORD`. From the dashboard you can:
@@ -166,21 +167,11 @@ Inside the bot's specific channel, type:
 
 This safely disconnects the bot from the Minecraft server and deletes the dedicated Discord channel.
 
-## ▲ Deploying the Dashboard on Vercel
+## ▲ Local Dashboard and Vercel
 
-Vercel hosts the dashboard interface, while the Mineflayer and Discord process must remain running on the bot host. The included serverless relay sends dashboard requests from Vercel to that host.
+The dashboard now runs directly on the same computer as the bot at `http://localhost:25567`. Keep `DASHBOARD_HOST=127.0.0.1` to prevent other devices from connecting to it.
 
-1. Import this GitHub repository into Vercel.
-2. Add this Vercel environment variable:
-
-```env
-BOT_BACKEND_URL=http://187.127.150.191:25567
-```
-
-3. Deploy without changing the framework preset or build command.
-4. Keep the bot host online and continue using `DASHBOARD_PASSWORD` from that host to sign in through the Vercel address.
-
-The Vercel version uses automatic three-second status refreshes. Direct access to the bot host also supports live event streaming.
+A Vercel deployment cannot connect to `localhost` on your computer. Remote dashboard access would require a secure HTTPS tunnel or another publicly reachable backend. Do not set `BOT_BACKEND_URL` to `localhost` in Vercel because that would refer to Vercel's own server rather than your computer.
 
 ## ⚙️ Running 24/7 in the Background (PM2)
 
@@ -192,10 +183,20 @@ To keep the bot running even if you close your terminal, it is recommended to us
 npm install -g pm2
 ```
 
-2. Start the bot:
+2. Start the bot using the included PM2 configuration:
 
 ```bash
-pm2 start index.js --name "afk-manager"
+pm2 start ecosystem.config.js
+pm2 save
+```
+
+Open `http://localhost:25567` in the browser on that computer. Useful controls are:
+
+```bash
+pm2 status
+pm2 logs axiora-afk
+pm2 restart axiora-afk
+pm2 stop axiora-afk
 ```
 
 (Optional) Start on Windows Boot:
