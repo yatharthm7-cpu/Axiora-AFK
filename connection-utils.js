@@ -47,6 +47,24 @@ function versionPreference(value) {
     return normalizeMinecraftVersion(value) || 'auto';
 }
 
+function compatibilityFallbackVersion(requestedVersion, activeVersion, reason) {
+    // A manually selected version is authoritative. Automatic mode can fall
+    // back when a modern proxy accepts the connection but its game backend
+    // cannot handle the proxy-advertised protocol.
+    if (normalizeMinecraftVersion(requestedVersion)) return null;
+
+    const message = String(reason || '').toLowerCase();
+    const looksLikeProtocolFailure =
+        /internal\s+(?:server\s+connection\s+)?error/.test(message) ||
+        /unable\s+to\s+connect\s+to\s+\S+.*internal/.test(message) ||
+        /outdated\s+(?:client|server)/.test(message) ||
+        /unsupported\s+(?:client|protocol|version)/.test(message) ||
+        /incompatible\s+(?:client|protocol|version)/.test(message);
+
+    if (!looksLikeProtocolFailure || activeVersion === '1.21.1') return null;
+    return '1.21.1';
+}
+
 function normalizeJoinCommand(value) {
     const command = optionalValue(value);
     if (!command) return null;
@@ -92,6 +110,7 @@ function validateAccountName(value, authType) {
 }
 
 module.exports = {
+    compatibilityFallbackVersion,
     defaultJoinCommandForHost,
     detectCrackedAuthAction,
     isCrackedAuthSuccess,

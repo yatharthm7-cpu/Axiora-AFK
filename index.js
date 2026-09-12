@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const mineflayer = require('mineflayer');
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
 const {
+    compatibilityFallbackVersion,
     detectCrackedAuthAction,
     isCrackedAuthSuccess,
     normalizeJoinCommand,
@@ -529,6 +530,7 @@ function saveSessions() {
             password: session.password,
             authType: session.authType,
             version: versionPreference(session.version),
+            autoVersionFallback: normalizeMinecraftVersion(session.autoVersionFallback),
             joinCommand: normalizeJoinCommand(session.joinCommand),
             metrics: ensureSessionMetrics(session),
             boneDropEnabled: Boolean(session.boneDropEnabled),
@@ -562,6 +564,7 @@ async function loadSessions() {
                     password: s.password,
                     authType: s.authType,
                     version: versionPreference(s.version),
+                    autoVersionFallback: normalizeMinecraftVersion(s.autoVersionFallback),
                     joinCommand: normalizeJoinCommand(s.joinCommand),
                     metrics: normalizeSessionMetrics(s.metrics),
                     boneDropEnabled: Boolean(s.boneDropEnabled),
@@ -626,6 +629,7 @@ function spawnDynamicBot(channelId) {
 
     const { host, port } = parseAddress(session.server_ip);
     const requestedVersion = normalizeMinecraftVersion(session.version);
+    const activeVersion = requestedVersion || normalizeMinecraftVersion(session.autoVersionFallback);
     const joinCommand = resolvedJoinCommand(session.joinCommand, host);
 
     // Prepare createBot options
@@ -637,7 +641,7 @@ function spawnDynamicBot(channelId) {
         hideErrors: true,
         viewDistance: 2
     };
-    if (requestedVersion) botOptions.version = requestedVersion;
+    if (activeVersion) botOptions.version = activeVersion;
 
     const bot = mineflayer.createBot(botOptions);
 
@@ -665,7 +669,7 @@ function spawnDynamicBot(channelId) {
         metrics.connections++;
         metrics.lastOnlineAt = new Date().toISOString();
         bot.onlineSince = Date.now();
-        session.detectedVersion = bot.version || requestedVersion || null;
+        session.detectedVersion = bot.version || activeVersion || null;
         saveSessions();
         broadcastDashboardEvent('status', { sessionId: channelId, state: 'online' });
         session.discordChannel.send(
@@ -777,11 +781,29 @@ function spawnDynamicBot(channelId) {
         
         const botName = bot.username || session.username;
         const logMsg = `⚠️ **${botName}** kicked from ${host}: \`${parsedReason}\``;
+        const lowerReason = parsedReason.toLowerCase();
+        const fallbackVersion = compatibilityFallbackVersion(
+            session.version,
+            bot.version || activeVersion,
+            parsedReason
+        );
+        const fallbackApplied = Boolean(
+            fallbackVersion && session.autoVersionFallback !== fallbackVersion
+        );
+        if (fallbackApplied) {
+            // Store the fallback before awaiting Discord so the reconnect timer
+            // always sees it, even if Discord is slow or unavailable.
+            session.autoVersionFallback = fallbackVersion;
+            saveSessions();
+        }
         
         logToCentral(logMsg);
         const kickMessage = await session.discordChannel.send(logMsg).catch(() => {});
-        
-        const lowerReason = parsedReason.toLowerCase();
+        if (fallbackApplied) {
+            session.discordChannel.send(
+                `🧩 Auto compatibility will retry **${botName}** using Minecraft **${fallbackVersion}**.`
+            ).catch(() => {});
+        }
         if (kickMessage && (lowerReason.includes('logging in too fast') || lowerReason.includes('internal error'))) {
             setTimeout(() => {
                 kickMessage.delete().catch(() => {});
@@ -1008,6 +1030,7 @@ discordClient.on('messageCreate', async (message) => {
                 password: password === '-' ? '' : password,
                 authType: authType,
                 version,
+                autoVersionFallback: null,
                 joinCommand,
                 metrics: normalizeSessionMetrics(),
                 boneDropEnabled: false,
@@ -1067,6 +1090,7 @@ discordClient.on('messageCreate', async (message) => {
                         password: sessionData.password,
                         authType: sessionData.authType,
                         version: versionPreference(sessionData.version),
+                        autoVersionFallback: normalizeMinecraftVersion(sessionData.autoVersionFallback),
                         joinCommand: normalizeJoinCommand(sessionData.joinCommand),
                         metrics: normalizeSessionMetrics(sessionData.metrics),
                         boneDropEnabled: Boolean(sessionData.boneDropEnabled),
@@ -1426,6 +1450,7 @@ function createDashboardBot(payload) {
         password: password === '-' ? '' : password,
         authType,
         version,
+        autoVersionFallback: null,
         joinCommand,
         metrics: normalizeSessionMetrics(),
         boneDropEnabled: false,
