@@ -7,7 +7,7 @@ A multi-account AFK bot for supported Minecraft Java servers, controlled through
 *   **Discord + Web Dashboard:** Control and monitor all your bots from Discord or a password-protected browser dashboard.
 *   **Multi-Account Support:** Spawns isolated, secure Discord text channels for each active bot.
 *   **Auto-Authentication:** Automatically detects login prompts and handles `/register` or `/login` commands (AuthMe support).
-*   **Multi-Version Connections:** Automatically detects supported Minecraft Java versions (currently 1.8.8 through 1.21.11), with an optional fixed-version override.
+*   **Multi-Version Connections:** Automatically detects the server's supported Minecraft Java protocol, including modern calendar-style versions such as 26.1, with an optional fixed-version override.
 *   **Optional Network Navigation:** Saves a different post-login command for each bot instead of forcing a specific hub or game mode.
 *   **Custom Anti-AFK:** Periodically shifts camera angles, sneaks, and swings arms to mimic real player behavior.
 *   **Auto-Reconnect:** Gracefully handles unexpected server kicks or Wi-Fi drops and automatically reconnects when the network is restored.
@@ -88,7 +88,7 @@ Once the bot is running, you control it entirely through Discord.
 Type the following command in any channel your Discord bot can read:
 
 ```text
-/spawn <username> <server[:port]> <password|-> [offline|microsoft]
+/spawn <username> <server[:port]> <password|-> [offline|microsoft] [version|auto] [post-login command]
 ```
 
 username: The Minecraft username for the bot.
@@ -99,12 +99,17 @@ password: The cracked-server password. Use `-` if that server has no `/login` pl
 
 auth: Use `offline` for cracked servers or `microsoft` for premium accounts. The default is `offline`.
 
+version: Use `auto` or omit it for automatic detection. A fixed value such as `1.21.1` or `26.1` can be used if a particular server requires it.
+
+post-login command: Optional command sent after authentication, such as `/server survival`. FatalMC accounts retain `/server lifesteal` as their default; other servers receive no network-specific command.
+
 Example:
 
 ```text
 /spawn IAMCRAFTY1 play.example.com MySecretPass offline
-/spawn IAMCRAFTY2 play.example.com:25566 MySecretPass offline
-/spawn PremiumName play.example.com - microsoft
+/spawn PotionBot play.potionmc.net MySecretPass offline auto
+/spawn IAMCRAFTY2 play.example.com:25566 MySecretPass offline auto /server survival
+/spawn PremiumName play.example.com - microsoft auto
 ```
 
 The bot will automatically create a private Discord channel named #bot-iamcrafty1 where it will stream the game chat and events.
@@ -121,7 +126,7 @@ Minecraft commands beginning with `/` can be sent directly from the account's Di
 
 ### Compatibility limits
 
-This project targets Minecraft **Java Edition** versions supported by the installed Mineflayer release. It automatically handles the common `/register password password` and `/login password` flows used by AuthMe-style plugins. No client can guarantee compatibility with every cracked server: custom CAPTCHA challenges, website linking, modded clients, custom encryption, unsupported protocol versions, or server anti-bot rules can still require manual action or server-specific code. Use the bot only where automation is permitted.
+This project targets standard Minecraft **Java Edition** servers supported by the installed Mineflayer release. The connection was status-tested against `play.potionmc.net`, and the bot no longer sends FatalMC commands there. It automatically handles common `/register`, `/reg`, `/login`, and `/l` prompts used by AuthMe-style plugins. No client can guarantee compatibility with literally every server: CAPTCHA challenges, website linking, custom launchers, unsupported protocol versions, or server anti-bot rules can still require manual action or server-specific code. Use the bot only where automation is permitted.
 
 ### Automatic Bone Drops
 

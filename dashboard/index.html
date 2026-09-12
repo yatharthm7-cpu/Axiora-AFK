@@ -112,7 +112,7 @@
             </div>
             <div class="form-grid">
                 <label>Username
-                    <input name="username" maxlength="16" pattern="[A-Za-z0-9_]{1,16}" required placeholder="BotName">
+                    <input name="username" maxlength="254" required placeholder="BotName or Microsoft email">
                 </label>
                 <label>Minecraft server
                     <input name="server" required placeholder="play.example.net:25565">
@@ -125,6 +125,12 @@
                         <option value="offline">Offline / cracked</option>
                         <option value="microsoft">Microsoft</option>
                     </select>
+                </label>
+                <label>Minecraft version
+                    <input name="version" value="auto" maxlength="16" placeholder="auto, 1.21.1, or 26.1">
+                </label>
+                <label class="span-two">Post-login command (optional)
+                    <input name="joinCommand" maxlength="256" placeholder="Example: /server survival">
                 </label>
             </div>
             <p id="createError" class="form-message error" role="alert"></p>
@@ -156,7 +162,7 @@
             <section class="control-section">
                 <h3>Send to Minecraft</h3>
                 <form id="sendForm" class="inline-form">
-                    <input name="text" maxlength="256" required placeholder="/server lifesteal or a chat message">
+                    <input name="text" maxlength="256" required placeholder="/server survival or a chat message">
                     <button class="primary" type="submit">Send</button>
                 </form>
             </section>

@@ -5,6 +5,16 @@ const http = require('http');
 const crypto = require('crypto');
 const mineflayer = require('mineflayer');
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
+const {
+    detectCrackedAuthAction,
+    isCrackedAuthSuccess,
+    normalizeJoinCommand,
+    normalizeMinecraftVersion,
+    parseAddress,
+    resolvedJoinCommand,
+    validateAccountName,
+    versionPreference
+} = require('./connection-utils');
 
 const discordClient = new Client({
     intents: [
@@ -518,6 +528,8 @@ function saveSessions() {
             server_ip: session.server_ip,
             password: session.password,
             authType: session.authType,
+            version: versionPreference(session.version),
+            joinCommand: normalizeJoinCommand(session.joinCommand),
             metrics: ensureSessionMetrics(session),
             boneDropEnabled: Boolean(session.boneDropEnabled),
             boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds),
@@ -549,6 +561,8 @@ async function loadSessions() {
                     server_ip: s.server_ip,
                     password: s.password,
                     authType: s.authType,
+                    version: versionPreference(s.version),
+                    joinCommand: normalizeJoinCommand(s.joinCommand),
                     metrics: normalizeSessionMetrics(s.metrics),
                     boneDropEnabled: Boolean(s.boneDropEnabled),
                     boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(s.boneDropIntervalSeconds),
@@ -610,14 +624,9 @@ function spawnDynamicBot(channelId) {
     const session = botSessions.get(channelId);
     if (!session || session.stopped) return;
 
-    let host = session.server_ip;
-    let port = 25565;
-    
-    if (session.server_ip.includes(':')) {
-        const parts = session.server_ip.split(':');
-        host = parts[0];
-        port = parseInt(parts[1], 10);
-    }
+    const { host, port } = parseAddress(session.server_ip);
+    const requestedVersion = normalizeMinecraftVersion(session.version);
+    const joinCommand = resolvedJoinCommand(session.joinCommand, host);
 
     // Prepare createBot options
     const botOptions = {
@@ -625,10 +634,10 @@ function spawnDynamicBot(channelId) {
         port: port,
         username: session.username,
         auth: session.authType,
-        version: '1.21.1',
         hideErrors: true,
         viewDistance: 2
     };
+    if (requestedVersion) botOptions.version = requestedVersion;
 
     const bot = mineflayer.createBot(botOptions);
 
@@ -636,12 +645,12 @@ function spawnDynamicBot(channelId) {
     bot.customPassword = session.password;
     bot.targetHost = host;
     bot.discordChannelId = channelId; 
-    bot.isAuthenticated = false;
+    bot.isAuthenticated = !bot.customPassword;
     bot.authSent = false; 
-    bot.hubRoutingCooldown = false; 
+    bot.joinCommandSent = false;
 
     bot.afkInterval = null; 
-    bot.lifestealTimer = null;
+    bot.joinCommandTimer = null;
     bot.sellInterval = null; 
     bot.scheduleSellInterval = null;
     bot.autoEatInterval = null; 
@@ -656,31 +665,37 @@ function spawnDynamicBot(channelId) {
         metrics.connections++;
         metrics.lastOnlineAt = new Date().toISOString();
         bot.onlineSince = Date.now();
+        session.detectedVersion = bot.version || requestedVersion || null;
         saveSessions();
         broadcastDashboardEvent('status', { sessionId: channelId, state: 'online' });
-        session.discordChannel.send(`✅ **${botName}** spawned! *(Waiting 10 seconds to route...)*`).catch(() => {});
+        session.discordChannel.send(
+            `✅ **${botName}** connected to **${host}:${port}** using Minecraft **${session.detectedVersion || 'auto'}**.`
+        ).catch(() => {});
         
         if (bot.afkInterval) clearInterval(bot.afkInterval);
 
         // Turn off heavy physics calculations immediately to save CPU
         bot.physicsEnabled = false;
 
-        // 10-Second Auto-Route Logic
-        bot.lifestealTimer = setTimeout(() => {
-            if (session.stopped || session.bot !== bot) return;
-
-            session.discordChannel.send(`➡️ 10 seconds passed. Sent \`/server lifesteal\`...`).catch(() => {});
-            
-            if (bot.afkInterval) {
-                clearInterval(bot.afkInterval);
-                bot.afkInterval = null;
-            }
-            bot.clearControlStates();
-            bot.physicsEnabled = false;
-
-            try { bot.chat('/server lifesteal'); } catch(e) {}
-            
-        }, 10000);
+        // Optional network routing. FatalMC keeps its historical Lifesteal
+        // default; every other server receives no server-specific command
+        // unless the account explicitly configured one.
+        if (joinCommand) {
+            const routeDeadline = Date.now() + 60000;
+            const sendJoinCommandWhenReady = () => {
+                if (session.stopped || session.bot !== bot || bot.joinCommandSent) return;
+                if (bot.customPassword && !bot.isAuthenticated && Date.now() < routeDeadline) {
+                    bot.joinCommandTimer = setTimeout(sendJoinCommandWhenReady, 3000);
+                    return;
+                }
+                try {
+                    bot.chat(joinCommand);
+                    bot.joinCommandSent = true;
+                    session.discordChannel.send(`➡️ Sent configured post-login command: \`${joinCommand}\`.`).catch(() => {});
+                } catch (error) {}
+            };
+            bot.joinCommandTimer = setTimeout(sendJoinCommandWhenReady, 10000);
+        }
 
         // Light Weight Anti-AFK (Zero Physics calculation)
         setTimeout(() => {
@@ -712,46 +727,28 @@ function spawnDynamicBot(channelId) {
         if (!message || message.trim() === '') return;
         if (position === 'game_info') return;
 
-        const lowerMsg = message.toLowerCase();
         session.discordChannel.send(`💬 ${message}`).catch(() => {});
 
-        // Authentication Logic
+        // Common cracked-server authentication prompts (AuthMe and similar).
         if (bot.customPassword && !bot.isAuthenticated && !bot.authSent) {
-            if (lowerMsg.includes('/register')) {
+            const authAction = detectCrackedAuthAction(message);
+            if (authAction === 'register') {
                 bot.authSent = true;
                 try { bot.chat(`/register ${bot.customPassword} ${bot.customPassword}`); } catch(e) {}
-            } else if (lowerMsg.includes('/login')) {
+            } else if (authAction === 'login') {
                 bot.authSent = true;
                 try { bot.chat(`/login ${bot.customPassword}`); } catch(e) {}
             }
+            if (bot.authSent) {
+                setTimeout(() => {
+                    if (session.bot === bot && !bot.isAuthenticated) bot.authSent = false;
+                }, 7000);
+            }
         }
 
-        if (bot.customPassword && !bot.isAuthenticated && 
-           (lowerMsg.includes('successfully') || lowerMsg.includes('logged in') || lowerMsg.includes('authenticated') || lowerMsg.includes('success'))) {
-            
+        if (bot.customPassword && !bot.isAuthenticated && isCrackedAuthSuccess(message)) {
             bot.isAuthenticated = true;
             session.discordChannel.send(`🔑 **${bot.username}** authenticated!`).catch(() => {});
-        }
-
-        // Hub Recovery
-        const isHubMessage = lowerMsg.includes('fastclient') || lowerMsg.includes('fatalmc') || lowerMsg.includes('store.fatalmc.org');
-        
-        if (isHubMessage && bot.isAuthenticated && !bot.hubRoutingCooldown) {
-            bot.hubRoutingCooldown = true; 
-            session.discordChannel.send(`⚠️ **${bot.username}** detected in Hub! Automatically transferring to Lifesteal...`).catch(() => {});
-
-            if (bot.afkInterval) {
-                clearInterval(bot.afkInterval);
-                bot.afkInterval = null;
-            }
-            bot.clearControlStates();
-            bot.physicsEnabled = false;
-
-            try { bot.chat('/server lifesteal'); } catch(e) {}
-
-            setTimeout(() => {
-                if (bot) bot.hubRoutingCooldown = false;
-            }, 25000);
         }
     });
 
@@ -773,21 +770,13 @@ function spawnDynamicBot(channelId) {
     });
 
     bot.on('kicked', async (reason) => {
-        let parsedReason = String(reason); 
-        if (typeof reason === 'object') {
-            try {
-                if (reason.value && reason.value.text && reason.value.text.value) {
-                    parsedReason = reason.value.text.value;
-                } else {
-                    parsedReason = JSON.stringify(reason, null, 2);
-                }
-            } catch (e) {
-                parsedReason = "Unknown Object";
-            }
-        }
+        const parsedReason = (extractMinecraftText(reason) || String(reason) || 'Unknown reason')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 800);
         
         const botName = bot.username || session.username;
-        const logMsg = `⚠️ **${botName}** kicked from ${host}:\n\`\`\`json\n${parsedReason}\n\`\`\``;
+        const logMsg = `⚠️ **${botName}** kicked from ${host}: \`${parsedReason}\``;
         
         logToCentral(logMsg);
         const kickMessage = await session.discordChannel.send(logMsg).catch(() => {});
@@ -809,7 +798,7 @@ function spawnDynamicBot(channelId) {
         
         // --- Aggressive Memory Leak Cleanup ---
         if (bot.afkInterval) clearInterval(bot.afkInterval);
-        if (bot.lifestealTimer) clearTimeout(bot.lifestealTimer);
+        if (bot.joinCommandTimer) clearTimeout(bot.joinCommandTimer);
         if (bot.sellInterval) clearInterval(bot.sellInterval);
         if (bot.scheduleSellInterval) clearInterval(bot.scheduleSellInterval);
         if (bot.autoEatInterval) clearInterval(bot.autoEatInterval); 
@@ -948,7 +937,7 @@ scheduleEngine.unref();
 
 discordClient.once('clientReady', async () => {
     console.log(`Logged in to Discord as ${discordClient.user.tag}`);
-    console.log('Use /spawn <username> <ip> <password> <auth> to begin.');
+    console.log('Use /spawn <username> <server[:port]> <password|-> [offline|microsoft] [version|auto] [post-login command] to begin.');
     
     await loadSessions();
 });
@@ -963,10 +952,21 @@ discordClient.on('messageCreate', async (message) => {
         const username = args[1];
         const server_ip = args[2];
         const password = args[3];
-        const authType = args[4] || 'offline'; 
+        const authType = String(args[4] || 'offline').toLowerCase();
 
         if (!username || !server_ip || !password) {
-            return message.reply("❌ **Invalid Format.** Use: `/spawn <username> <server_ip> <password> <auth>`").catch(() => {});
+            return message.reply("❌ **Invalid Format.** Use: `/spawn <username> <server[:port]> <password|-> [offline|microsoft] [version|auto] [post-login command]`").catch(() => {});
+        }
+        let version;
+        let joinCommand;
+        try {
+            if (!['offline', 'microsoft'].includes(authType)) throw new Error('Authentication must be offline or microsoft.');
+            validateAccountName(username, authType);
+            parseAddress(server_ip);
+            version = versionPreference(args[5]);
+            joinCommand = normalizeJoinCommand(args.slice(6).join(' '));
+        } catch (error) {
+            return message.reply(`❌ **Invalid connection settings:** ${error.message}`).catch(() => {});
         }
 
         const existingSession = Array.from(botSessions.values()).find(s => s.username.toLowerCase() === username.toLowerCase());
@@ -991,7 +991,7 @@ discordClient.on('messageCreate', async (message) => {
             }
 
             const newChannel = await message.guild.channels.create({
-                name: `bot-${username.toLowerCase()}`,
+                name: `bot-${username.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 70)}`,
                 type: ChannelType.GuildText,
                 parent: category.id, 
                 permissionOverwrites: [
@@ -1005,8 +1005,10 @@ discordClient.on('messageCreate', async (message) => {
                 source: 'discord',
                 username: username,
                 server_ip: server_ip,
-                password: password,
+                password: password === '-' ? '' : password,
                 authType: authType,
+                version,
+                joinCommand,
                 metrics: normalizeSessionMetrics(),
                 boneDropEnabled: false,
                 boneDropIntervalSeconds: DEFAULT_BONE_DROP_INTERVAL_SECONDS,
@@ -1064,6 +1066,8 @@ discordClient.on('messageCreate', async (message) => {
                         server_ip: sessionData.server_ip,
                         password: sessionData.password,
                         authType: sessionData.authType,
+                        version: versionPreference(sessionData.version),
+                        joinCommand: normalizeJoinCommand(sessionData.joinCommand),
                         metrics: normalizeSessionMetrics(sessionData.metrics),
                         boneDropEnabled: Boolean(sessionData.boneDropEnabled),
                         boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(sessionData.boneDropIntervalSeconds),
@@ -1368,6 +1372,11 @@ function dashboardBotSummary(id, session) {
         username: session.username,
         server: session.server_ip,
         authType: session.authType,
+        version: {
+            requested: versionPreference(session.version),
+            detected: session.detectedVersion || bot?.version || null
+        },
+        joinCommand: resolvedJoinCommand(session.joinCommand, parseAddress(session.server_ip).host),
         state,
         health: Number.isFinite(bot?.health) ? Math.round(bot.health * 10) / 10 : null,
         food: Number.isFinite(bot?.food) ? bot.food : null,
@@ -1394,17 +1403,14 @@ function dashboardBotSummary(id, session) {
 }
 
 function createDashboardBot(payload) {
-    const username = String(payload.username || '').trim();
+    const authType = String(payload.authType || 'offline').toLowerCase();
+    const username = validateAccountName(payload.username, authType);
     const server_ip = String(payload.server || '').trim();
     const password = String(payload.password || '').trim();
-    const authType = String(payload.authType || 'offline').toLowerCase();
+    const version = versionPreference(payload.version);
+    const joinCommand = normalizeJoinCommand(payload.joinCommand);
 
-    if (!/^[A-Za-z0-9_]{1,16}$/.test(username)) {
-        throw new Error('Minecraft username must be 1-16 letters, numbers, or underscores.');
-    }
-    if (!server_ip || server_ip.length > 255 || /\s/.test(server_ip)) {
-        throw new Error('Enter a valid Minecraft server address.');
-    }
+    parseAddress(server_ip);
     if (!['offline', 'microsoft'].includes(authType)) {
         throw new Error('Authentication must be offline or microsoft.');
     }
@@ -1419,6 +1425,8 @@ function createDashboardBot(payload) {
         server_ip,
         password: password === '-' ? '' : password,
         authType,
+        version,
+        joinCommand,
         metrics: normalizeSessionMetrics(),
         boneDropEnabled: false,
         boneDropIntervalSeconds: DEFAULT_BONE_DROP_INTERVAL_SECONDS,
@@ -1442,7 +1450,7 @@ function createDashboardBot(payload) {
 function clearManagedBotTimers(bot) {
     if (!bot) return;
     if (bot.afkInterval) clearInterval(bot.afkInterval);
-    if (bot.lifestealTimer) clearTimeout(bot.lifestealTimer);
+    if (bot.joinCommandTimer) clearTimeout(bot.joinCommandTimer);
     if (bot.sellInterval) clearInterval(bot.sellInterval);
     if (bot.scheduleSellInterval) clearInterval(bot.scheduleSellInterval);
     if (bot.autoEatInterval) clearInterval(bot.autoEatInterval);
@@ -1524,7 +1532,10 @@ async function runDashboardAction(id, payload) {
         if (!text || text.length > 256) throw new Error('Enter a command or chat message up to 256 characters.');
         if (!bot.entity) throw new Error('The bot has not finished connecting yet.');
         bot.chat(text);
-        addDashboardLog(id, `You sent: ${text}`);
+        const safeText = /^\/(?:login|l|register|reg)\s+/i.test(text)
+            ? `${text.split(/\s+/)[0]} [password hidden]`
+            : text;
+        addDashboardLog(id, `You sent: ${safeText}`);
         return { message: 'Message sent.' };
     }
 

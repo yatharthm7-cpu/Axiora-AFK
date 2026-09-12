@@ -132,7 +132,7 @@ function botCard(bot) {
                     <div class="avatar">${escapeHtml(bot.username.slice(0, 1).toUpperCase())}</div>
                     <div>
                         <h3>${escapeHtml(bot.username)}</h3>
-                        <p class="muted">${escapeHtml(bot.server)}</p>
+                        <p class="muted">${escapeHtml(bot.server)} · ${escapeHtml(bot.version?.detected || bot.version?.requested || 'auto')}</p>
                     </div>
                 </div>
                 <span class="status-pill ${escapeHtml(bot.state)}">${escapeHtml(bot.state)}</span>
