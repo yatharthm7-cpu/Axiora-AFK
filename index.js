@@ -45,9 +45,7 @@ const DEFAULT_BONE_DROP_INTERVAL_SECONDS = 60;
 const MIN_BONE_DROP_INTERVAL_SECONDS = 5;
 const MAX_BONE_DROP_INTERVAL_SECONDS = 86400;
 const DEFAULT_SELL_MACRO_INTERVAL_SECONDS = 30;
-// A very fast command loop is likely to trigger a server's own command-rate
-// limits.  Keep this conservative; it is not intended to bypass them.
-const MIN_SELL_MACRO_INTERVAL_SECONDS = 15;
+const MIN_SELL_MACRO_INTERVAL_SECONDS = 1;
 const MAX_SELL_MACRO_INTERVAL_SECONDS = 86400;
 
 function stripDiscordFormatting(value) {
@@ -168,7 +166,7 @@ function normalizeSchedule(value = {}) {
         sellStartTime: normalizeClockTime(value.sellStartTime, '06:00'),
         sellStopTime: normalizeClockTime(value.sellStopTime, '23:00'),
         sellIntervalSeconds: Number.isInteger(sellIntervalSeconds) && sellIntervalSeconds > 0 && sellIntervalSeconds <= 86400
-            ? Math.max(sellIntervalSeconds, MIN_SELL_MACRO_INTERVAL_SECONDS)
+            ? sellIntervalSeconds
             : DEFAULT_SELL_MACRO_INTERVAL_SECONDS,
         maintenanceEnabled: Boolean(value.maintenanceEnabled),
         maintenanceStartTime: normalizeClockTime(value.maintenanceStartTime, '03:00'),
@@ -184,7 +182,7 @@ function normalizeSellMacroIntervalSeconds(value) {
     if (!Number.isInteger(seconds) || seconds <= 0 || seconds > MAX_SELL_MACRO_INTERVAL_SECONDS) {
         throw new Error(`Sell Macro interval must be ${MIN_SELL_MACRO_INTERVAL_SECONDS}-${MAX_SELL_MACRO_INTERVAL_SECONDS} seconds.`);
     }
-    return Math.max(seconds, MIN_SELL_MACRO_INTERVAL_SECONDS);
+    return seconds;
 }
 
 function startSellMacro(bot, session) {
