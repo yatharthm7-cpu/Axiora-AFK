@@ -485,7 +485,9 @@ async function openSkeletonOverview(bot) {
 
 async function openSkeletonLootMenu(bot) {
     let window = await openSkeletonOverview(bot);
-    if (findDropLootSlot(window, false) >= 0 || window.inventoryStart >= 45) return window;
+    // Both the overview and the detailed storage page can use a large chest
+    // layout.  Only the actual Drop Loot control proves this is the loot page.
+    if (findDropLootSlot(window, false) >= 0) return window;
 
     let storageSlot = findMenuSlot(window, (text, item) =>
         item.name === 'chest' || text.includes('spawner storage'));
@@ -499,7 +501,7 @@ async function openSkeletonLootMenu(bot) {
     window = await waitUntil(() => {
         const candidate = bot.currentWindow;
         if (!menuTitle(candidate).toLowerCase().includes('skeleton spawner')) return null;
-        return candidate.inventoryStart >= 45 || findDropLootSlot(candidate, false) >= 0 ? candidate : null;
+        return findDropLootSlot(candidate, false) >= 0 ? candidate : null;
     }, 4000);
     if (!window) throw new Error('Spawner Storage did not open the detailed Skeleton loot view.');
     return window;
