@@ -4,6 +4,7 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const mineflayer = require('mineflayer');
+const MINEFLAYER_VERSION = require('mineflayer/package.json').version;
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
 const {
     compatibilityFallbackVersion,
@@ -600,7 +601,9 @@ async function loadSessions() {
                     password: s.password,
                     authType: s.authType,
                     version: versionPreference(s.version),
-                    autoVersionFallback: normalizeMinecraftVersion(s.autoVersionFallback),
+                    // A generic backend error is not proof of a version mismatch.
+                    // Clear old fallback data created by earlier versions of this app.
+                    autoVersionFallback: null,
                     joinCommand: normalizeJoinCommand(s.joinCommand),
                     metrics: normalizeSessionMetrics(s.metrics),
                     boneDropEnabled: Boolean(s.boneDropEnabled),
@@ -1001,6 +1004,7 @@ scheduleEngine.unref();
 
 discordClient.once('clientReady', async () => {
     console.log(`Logged in to Discord as ${discordClient.user.tag}`);
+    console.log(`Mineflayer version: ${MINEFLAYER_VERSION}`);
     console.log('Use /spawn <username> <server[:port]> <password|-> [offline|microsoft] [version|auto] [post-login command] to begin.');
     
     await loadSessions();

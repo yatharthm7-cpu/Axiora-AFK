@@ -38,13 +38,9 @@ test('automatic and fixed old/new Minecraft version formats are normalized', () 
 });
 
 test('automatic mode falls back for proxy/backend protocol failures', () => {
-    assert.equal(
-        compatibilityFallbackVersion('auto', '26.1', 'Unable to connect to lifesteal: An internal server connection error occurred.'),
-        '1.21.1'
-    );
     assert.equal(compatibilityFallbackVersion('auto', '26.1', 'Outdated client!'), '1.21.1');
     assert.equal(compatibilityFallbackVersion('1.21.4', '1.21.4', 'Outdated client!'), null);
-    assert.equal(compatibilityFallbackVersion('auto', '1.21.1', 'Internal server connection error'), null);
+    assert.equal(compatibilityFallbackVersion('auto', '26.1', 'Internal server connection error'), null);
     assert.equal(compatibilityFallbackVersion('auto', '26.1', 'You are banned'), null);
 });
 

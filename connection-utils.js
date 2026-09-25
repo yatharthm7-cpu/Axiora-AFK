@@ -55,8 +55,6 @@ function compatibilityFallbackVersion(requestedVersion, activeVersion, reason) {
 
     const message = String(reason || '').toLowerCase();
     const looksLikeProtocolFailure =
-        /internal\s+(?:server\s+connection\s+)?error/.test(message) ||
-        /unable\s+to\s+connect\s+to\s+\S+.*internal/.test(message) ||
         /outdated\s+(?:client|server)/.test(message) ||
         /unsupported\s+(?:client|protocol|version)/.test(message) ||
         /incompatible\s+(?:client|protocol|version)/.test(message);
