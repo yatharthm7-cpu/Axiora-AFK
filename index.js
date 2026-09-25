@@ -497,8 +497,13 @@ function spawnDynamicBot(channelId) {
             session.discordChannel.send(`🔑 **${bot.username}** authenticated!`).catch(() => {});
         }
 
-        // Hub Recovery
-        const isHubMessage = lowerMsg.includes('fastclient') || lowerMsg.includes('fatalmc') || lowerMsg.includes('store.fatalmc.org');
+        // Hub Recovery: only react to explicit hub/lobby indicators. Generic
+        // FatalMC and web-store advertisements also appear on Lifesteal and
+        // must not trigger repeated /server transfers.
+        const isHubMessage = lowerMsg.includes('fastclient') ||
+            lowerMsg.includes('server selector') ||
+            lowerMsg.includes('connected to the hub') ||
+            lowerMsg.includes('connected to the lobby');
 
         if (isHubMessage && bot.isAuthenticated && !bot.hubRoutingCooldown) {
             bot.hubRoutingCooldown = true;
@@ -534,6 +539,7 @@ function spawnDynamicBot(channelId) {
             errDesc += ' (Possible proxy issue)';
         }
         const msg = `🚨 **${botName}** encountered an error: \`${errDesc}\``;
+        session.discordChannel.send(msg).catch(() => {});
         logToCentral(msg);
     });
 
@@ -557,17 +563,13 @@ function spawnDynamicBot(channelId) {
         logToCentral(logMsg);
         const kickMessage = await session.discordChannel.send(logMsg).catch(() => {});
 
-        const lowerReason = parsedReason.toLowerCase();
-        if (kickMessage && (lowerReason.includes('logging in too fast') || lowerReason.includes('internal error'))) {
-            setTimeout(() => {
-                kickMessage.delete().catch(() => {});
-            }, 5000);
-        }
+        void kickMessage;
     });
 
-    bot.on('end', () => {
+    bot.on('end', (reason) => {
         const botName = session.username;
-        session.discordChannel.send(`🔌 **${botName}** disconnected.`).catch(() => {});
+        const endReason = String(reason || 'socket closed').replace(/\s+/g, ' ').slice(0, 300);
+        session.discordChannel.send(`🔌 **${botName}** disconnected: \`${endReason}\``).catch(() => {});
         
         // --- Aggressive Memory Leak Cleanup ---
         if (bot.afkInterval) clearInterval(bot.afkInterval);
