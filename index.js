@@ -28,7 +28,9 @@ const discordClient = new Client({
 
 // Key = Discord Channel ID, Value = Session Object
 const botSessions = new Map(); 
-const reconnectInterval = 5000;
+const INITIAL_RECONNECT_DELAY_MS = 5000;
+const MAX_RECONNECT_DELAY_MS = 120000;
+const STABLE_CONNECTION_RESET_MS = 90000;
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const DASHBOARD_PUBLIC_DIR = path.join(__dirname, 'dashboard');
 const CENTRAL_LOG_CHANNEL = '1535252592198680607';
@@ -43,7 +45,9 @@ const DEFAULT_BONE_DROP_INTERVAL_SECONDS = 60;
 const MIN_BONE_DROP_INTERVAL_SECONDS = 5;
 const MAX_BONE_DROP_INTERVAL_SECONDS = 86400;
 const DEFAULT_SELL_MACRO_INTERVAL_SECONDS = 30;
-const MIN_SELL_MACRO_INTERVAL_SECONDS = 1;
+// A very fast command loop is likely to trigger a server's own command-rate
+// limits.  Keep this conservative; it is not intended to bypass them.
+const MIN_SELL_MACRO_INTERVAL_SECONDS = 15;
 const MAX_SELL_MACRO_INTERVAL_SECONDS = 86400;
 
 function stripDiscordFormatting(value) {
@@ -163,7 +167,9 @@ function normalizeSchedule(value = {}) {
         sellWindowEnabled: Boolean(value.sellWindowEnabled),
         sellStartTime: normalizeClockTime(value.sellStartTime, '06:00'),
         sellStopTime: normalizeClockTime(value.sellStopTime, '23:00'),
-        sellIntervalSeconds: Number.isInteger(sellIntervalSeconds) && sellIntervalSeconds >= 1 && sellIntervalSeconds <= 86400 ? sellIntervalSeconds : 30,
+        sellIntervalSeconds: Number.isInteger(sellIntervalSeconds) && sellIntervalSeconds > 0 && sellIntervalSeconds <= 86400
+            ? Math.max(sellIntervalSeconds, MIN_SELL_MACRO_INTERVAL_SECONDS)
+            : DEFAULT_SELL_MACRO_INTERVAL_SECONDS,
         maintenanceEnabled: Boolean(value.maintenanceEnabled),
         maintenanceStartTime: normalizeClockTime(value.maintenanceStartTime, '03:00'),
         maintenanceStopTime: normalizeClockTime(value.maintenanceStopTime, '04:00'),
@@ -175,10 +181,10 @@ function normalizeSchedule(value = {}) {
 
 function normalizeSellMacroIntervalSeconds(value) {
     const seconds = Number.parseInt(value, 10);
-    if (!Number.isInteger(seconds) || seconds < MIN_SELL_MACRO_INTERVAL_SECONDS || seconds > MAX_SELL_MACRO_INTERVAL_SECONDS) {
+    if (!Number.isInteger(seconds) || seconds <= 0 || seconds > MAX_SELL_MACRO_INTERVAL_SECONDS) {
         throw new Error(`Sell Macro interval must be ${MIN_SELL_MACRO_INTERVAL_SECONDS}-${MAX_SELL_MACRO_INTERVAL_SECONDS} seconds.`);
     }
-    return seconds;
+    return Math.max(seconds, MIN_SELL_MACRO_INTERVAL_SECONDS);
 }
 
 function startSellMacro(bot, session) {
@@ -191,6 +197,9 @@ function startSellMacro(bot, session) {
 
     const sell = () => {
         if (bot?.entity && bot.isAlive && session.bot === bot && !session.stopped) {
+            // Give login, routing and the server's own spawn handling time to
+            // finish before issuing automation commands after a reconnect.
+            if (Date.now() < (bot.automationReadyAt || 0)) return;
             try { bot.chat('/sell all'); } catch (error) {}
         }
     };
@@ -405,6 +414,25 @@ function inspectSpawnerLoot(window) {
     return { hasArrows, hasBones };
 }
 
+function spawnerLootFingerprint(window) {
+    if (!Number.isInteger(window?.inventoryStart)) return '';
+    const lootEnd = Math.max(0, window.inventoryStart - 9);
+    return window.slots.slice(0, lootEnd).map((item, slot) => {
+        if (!item) return `${slot}:`;
+        return `${slot}:${item.name}:${item.count || 0}:${item.metadata ?? ''}`;
+    }).join('|');
+}
+
+async function waitForLootRefresh(bot, previousFingerprint) {
+    return waitUntil(() => {
+        const candidate = bot.currentWindow;
+        if (!candidate || !menuTitle(candidate).toLowerCase().includes('skeleton spawner')) return null;
+        const loot = inspectSpawnerLoot(candidate);
+        if (loot.hasArrows || spawnerLootFingerprint(candidate) !== previousFingerprint) return { candidate, loot };
+        return null;
+    }, 3500, 100);
+}
+
 async function waitUntil(check, timeoutMs = 4000, intervalMs = 100) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -514,9 +542,13 @@ async function runBoneDropCycle(bot) {
 
             const dropSlot = findDropLootSlot(window);
             if (dropSlot < 0) throw new Error('The Drop Loot button was not found.');
+            const beforeDrop = spawnerLootFingerprint(window);
             await bot.clickWindow(dropSlot, 0, 0);
             dropActions++;
-            await new Promise(resolve => setTimeout(resolve, 500));
+            // The button drops the page's available stacks, but this server
+            // refreshes the same menu asynchronously.  Wait for that refresh
+            // before considering another Drop Loot click; there is no click cap.
+            await waitForLootRefresh(bot, beforeDrop);
         }
     } finally {
         bot.boneDropBusy = false;
@@ -549,6 +581,11 @@ function startBoneDropMacro(bot, session) {
             reportBoneDropProblem(session, error);
         }
     }, session.boneDropIntervalSeconds * 1000);
+}
+
+function reconnectDelayMs(session) {
+    const failures = Math.max(0, Number(session.reconnectFailures) || 0);
+    return Math.min(INITIAL_RECONNECT_DELAY_MS * (2 ** Math.min(failures, 5)), MAX_RECONNECT_DELAY_MS);
 }
 
 // ==========================================
@@ -701,6 +738,8 @@ function spawnDynamicBot(channelId) {
     bot.autoEatInterval = null; 
     bot.boneDropInterval = null;
     bot.boneDropBusy = false;
+    bot.stableConnectionTimer = null;
+    bot.automationReadyAt = Date.now() + 15000;
 
     // --- Minecraft Events ---
 
@@ -710,6 +749,13 @@ function spawnDynamicBot(channelId) {
         metrics.connections++;
         metrics.lastOnlineAt = new Date().toISOString();
         bot.onlineSince = Date.now();
+        if (bot.stableConnectionTimer) clearTimeout(bot.stableConnectionTimer);
+        bot.stableConnectionTimer = setTimeout(() => {
+            if (session.bot === bot && !session.stopped) {
+                session.reconnectFailures = 0;
+                saveSessions();
+            }
+        }, STABLE_CONNECTION_RESET_MS);
         session.detectedVersion = bot.version || activeVersion || null;
         saveSessions();
         broadcastDashboardEvent('status', { sessionId: channelId, state: 'online' });
@@ -870,15 +916,19 @@ function spawnDynamicBot(channelId) {
         if (bot.scheduleSellInterval) clearInterval(bot.scheduleSellInterval);
         if (bot.autoEatInterval) clearInterval(bot.autoEatInterval); 
         if (bot.boneDropInterval) clearInterval(bot.boneDropInterval);
+        if (bot.stableConnectionTimer) clearTimeout(bot.stableConnectionTimer);
         
         // Completely sever the connection between the session and the dead bot
         session.bot = null; 
 
         if (!session.stopped) {
-            session.discordChannel.send(`🔄 **${botName}** reconnecting in ${reconnectInterval / 1000}s...`).catch(() => {});
+            const reconnectDelay = reconnectDelayMs(session);
+            session.reconnectFailures = Math.min((Number(session.reconnectFailures) || 0) + 1, 6);
+            saveSessions();
+            session.discordChannel.send(`🔄 **${botName}** reconnecting in ${Math.round(reconnectDelay / 1000)}s...`).catch(() => {});
             session.reconnectTimer = setTimeout(() => {
                 spawnDynamicBot(channelId);
-            }, reconnectInterval);
+            }, reconnectDelay);
         }
     });
 }
@@ -917,6 +967,7 @@ function updateScheduledSell(sessionId, session, clock) {
     if (shouldRun && !bot.scheduleSellInterval) {
         const sell = () => {
             if (bot?.entity && bot.isAlive && session.bot === bot && !session.schedulePaused) {
+                if (Date.now() < (bot.automationReadyAt || 0)) return;
                 try { bot.chat('/sell all'); } catch (error) {}
             }
         };
@@ -1521,6 +1572,7 @@ function clearManagedBotTimers(bot) {
     if (bot.scheduleSellInterval) clearInterval(bot.scheduleSellInterval);
     if (bot.autoEatInterval) clearInterval(bot.autoEatInterval);
     if (bot.boneDropInterval) clearInterval(bot.boneDropInterval);
+    if (bot.stableConnectionTimer) clearTimeout(bot.stableConnectionTimer);
 }
 
 function removeManagedBot(id) {
