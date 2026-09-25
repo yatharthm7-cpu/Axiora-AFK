@@ -41,6 +41,9 @@ const dashboardEventClients = new Set();
 const DEFAULT_BONE_DROP_INTERVAL_SECONDS = 60;
 const MIN_BONE_DROP_INTERVAL_SECONDS = 5;
 const MAX_BONE_DROP_INTERVAL_SECONDS = 86400;
+const DEFAULT_SELL_MACRO_INTERVAL_SECONDS = 30;
+const MIN_SELL_MACRO_INTERVAL_SECONDS = 1;
+const MAX_SELL_MACRO_INTERVAL_SECONDS = 86400;
 
 function stripDiscordFormatting(value) {
     return String(value ?? '')
@@ -167,6 +170,37 @@ function normalizeSchedule(value = {}) {
         highPingThreshold: Number.isInteger(highPingThreshold) && highPingThreshold >= 50 && highPingThreshold <= 5000 ? highPingThreshold : 500,
         lastBoneDropRunKey: typeof value.lastBoneDropRunKey === 'string' ? value.lastBoneDropRunKey : null
     };
+}
+
+function normalizeSellMacroIntervalSeconds(value) {
+    const seconds = Number.parseInt(value, 10);
+    if (!Number.isInteger(seconds) || seconds < MIN_SELL_MACRO_INTERVAL_SECONDS || seconds > MAX_SELL_MACRO_INTERVAL_SECONDS) {
+        throw new Error(`Sell Macro interval must be ${MIN_SELL_MACRO_INTERVAL_SECONDS}-${MAX_SELL_MACRO_INTERVAL_SECONDS} seconds.`);
+    }
+    return seconds;
+}
+
+function startSellMacro(bot, session) {
+    if (!bot || !session) return;
+    session.sellMacroEnabled = true;
+    session.sellMacroIntervalSeconds = normalizeSellMacroIntervalSeconds(
+        session.sellMacroIntervalSeconds || DEFAULT_SELL_MACRO_INTERVAL_SECONDS
+    );
+    if (bot.sellInterval) clearInterval(bot.sellInterval);
+
+    const sell = () => {
+        if (bot?.entity && bot.isAlive && session.bot === bot && !session.stopped) {
+            try { bot.chat('/sell all'); } catch (error) {}
+        }
+    };
+    sell();
+    bot.sellInterval = setInterval(sell, session.sellMacroIntervalSeconds * 1000);
+}
+
+function stopSellMacro(bot, session) {
+    if (bot?.sellInterval) clearInterval(bot.sellInterval);
+    if (bot) bot.sellInterval = null;
+    if (session) session.sellMacroEnabled = false;
 }
 
 function timeToMinutes(value) {
@@ -535,6 +569,8 @@ function saveSessions() {
             metrics: ensureSessionMetrics(session),
             boneDropEnabled: Boolean(session.boneDropEnabled),
             boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds),
+            sellMacroEnabled: Boolean(session.sellMacroEnabled),
+            sellMacroIntervalSeconds: normalizeSellMacroIntervalSeconds(session.sellMacroIntervalSeconds || DEFAULT_SELL_MACRO_INTERVAL_SECONDS),
             schedule: normalizeSchedule(session.schedule)
         };
     }
@@ -569,6 +605,8 @@ async function loadSessions() {
                     metrics: normalizeSessionMetrics(s.metrics),
                     boneDropEnabled: Boolean(s.boneDropEnabled),
                     boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(s.boneDropIntervalSeconds),
+                    sellMacroEnabled: Boolean(s.sellMacroEnabled),
+                    sellMacroIntervalSeconds: normalizeSellMacroIntervalSeconds(s.sellMacroIntervalSeconds || DEFAULT_SELL_MACRO_INTERVAL_SECONDS),
                     schedule: normalizeSchedule(s.schedule),
                     discordChannel: createSessionChannel(channelId, discordChannel),
                     stopped: false,
@@ -722,6 +760,10 @@ function spawnDynamicBot(channelId) {
         if (session.boneDropEnabled) {
             startBoneDropMacro(bot, session);
             session.discordChannel.send(`🦴 Bone Drop restored with a **${session.boneDropIntervalSeconds}-second** cooldown.`).catch(() => {});
+        }
+        if (session.sellMacroEnabled) {
+            startSellMacro(bot, session);
+            session.discordChannel.send(`💰 Sell Macro restored every **${session.sellMacroIntervalSeconds} seconds**.`).catch(() => {});
         }
     });
 
@@ -1035,6 +1077,8 @@ discordClient.on('messageCreate', async (message) => {
                 metrics: normalizeSessionMetrics(),
                 boneDropEnabled: false,
                 boneDropIntervalSeconds: DEFAULT_BONE_DROP_INTERVAL_SECONDS,
+                sellMacroEnabled: false,
+                sellMacroIntervalSeconds: DEFAULT_SELL_MACRO_INTERVAL_SECONDS,
                 schedule: normalizeSchedule(),
                 discordChannel: createSessionChannel(newChannel.id, newChannel),
                 stopped: false,
@@ -1095,6 +1139,8 @@ discordClient.on('messageCreate', async (message) => {
                         metrics: normalizeSessionMetrics(sessionData.metrics),
                         boneDropEnabled: Boolean(sessionData.boneDropEnabled),
                         boneDropIntervalSeconds: normalizeBoneDropIntervalSeconds(sessionData.boneDropIntervalSeconds),
+                        sellMacroEnabled: Boolean(sessionData.sellMacroEnabled),
+                        sellMacroIntervalSeconds: normalizeSellMacroIntervalSeconds(sessionData.sellMacroIntervalSeconds || DEFAULT_SELL_MACRO_INTERVAL_SECONDS),
                         schedule: normalizeSchedule(sessionData.schedule),
                         discordChannel: channel,
                         stopped: false,
@@ -1261,33 +1307,22 @@ discordClient.on('messageCreate', async (message) => {
 
         if (content.toLowerCase().startsWith('!sellmacro on')) {
             const args = content.split(' ');
-            let seconds = 30; 
-            if (args[2] && !isNaN(args[2])) seconds = Math.max(1, parseInt(args[2], 10)); 
-
-            if (activeBot.sellInterval) {
-                clearInterval(activeBot.sellInterval);
-                activeBot.sellInterval = null;
+            try {
+                currentSession.sellMacroIntervalSeconds = normalizeSellMacroIntervalSeconds(
+                    args[2] || currentSession.sellMacroIntervalSeconds || DEFAULT_SELL_MACRO_INTERVAL_SECONDS
+                );
+                startSellMacro(activeBot, currentSession);
+                saveSessions();
+                return message.reply(`✅ Started the \`/sell all\` macro (Running every **${currentSession.sellMacroIntervalSeconds}s**). It will restore after reconnects.`).catch(() => {});
+            } catch (error) {
+                return message.reply(`❌ ${error.message}`).catch(() => {});
             }
-
-            try { if (activeBot && activeBot.entity && activeBot.isAlive) activeBot.chat('/sell all'); } catch (e) {}
-
-            activeBot.sellInterval = setInterval(() => {
-                try {
-                    if (activeBot && activeBot.entity && activeBot.isAlive) {
-                        activeBot.chat('/sell all');
-                    }
-                } catch (e) {}
-            }, seconds * 1000);
-
-            return message.reply(`✅ Started the \`/sell all\` macro (Running every **${seconds}s**).`).catch(() => {});
         }
 
         if (content.toLowerCase() === '!sellmacro off') {
-            if (activeBot.sellInterval) {
-                clearInterval(activeBot.sellInterval);
-                activeBot.sellInterval = null;
-                return message.reply("🛑 Stopped the `/sell all` macro.").catch(() => {});
-            }
+            stopSellMacro(activeBot, currentSession);
+            saveSessions();
+            return message.reply("🛑 Stopped the `/sell all` macro.").catch(() => {});
         }
 
         if (content.startsWith('/')) {
@@ -1455,6 +1490,8 @@ function createDashboardBot(payload) {
         metrics: normalizeSessionMetrics(),
         boneDropEnabled: false,
         boneDropIntervalSeconds: DEFAULT_BONE_DROP_INTERVAL_SECONDS,
+        sellMacroEnabled: false,
+        sellMacroIntervalSeconds: DEFAULT_SELL_MACRO_INTERVAL_SECONDS,
         schedule: normalizeSchedule(),
         discordChannel: createSessionChannel(id),
         stopped: false,
@@ -1588,18 +1625,16 @@ async function runDashboardAction(id, payload) {
         return { message: 'Bone Drop started. Watch the activity log for the result.' };
     }
     if (action === 'sell-on') {
-        const seconds = Number.parseInt(payload.seconds || '30', 10);
-        if (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400) throw new Error('Sell interval must be 1-86400 seconds.');
-        if (bot.sellInterval) clearInterval(bot.sellInterval);
-        if (bot.entity && bot.isAlive) bot.chat('/sell all');
-        bot.sellInterval = setInterval(() => {
-            if (bot?.entity && bot.isAlive) bot.chat('/sell all');
-        }, seconds * 1000);
-        return { message: `Sell Macro enabled every ${seconds} seconds.` };
+        session.sellMacroIntervalSeconds = normalizeSellMacroIntervalSeconds(
+            payload.seconds || session.sellMacroIntervalSeconds || DEFAULT_SELL_MACRO_INTERVAL_SECONDS
+        );
+        startSellMacro(bot, session);
+        saveSessions();
+        return { message: `Sell Macro enabled every ${session.sellMacroIntervalSeconds} seconds. It will restore after reconnects.` };
     }
     if (action === 'sell-off') {
-        if (bot.sellInterval) clearInterval(bot.sellInterval);
-        bot.sellInterval = null;
+        stopSellMacro(bot, session);
+        saveSessions();
         return { message: 'Sell Macro disabled.' };
     }
     if (action === 'autoeat-on') {
