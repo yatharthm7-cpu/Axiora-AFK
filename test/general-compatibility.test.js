@@ -11,6 +11,7 @@ const {
     optionalValue,
     parseAddress,
     resolvedJoinCommand,
+    resolvedMinecraftVersion,
     validateAccountName,
     versionPreference
 } = require('../connection-utils');
@@ -42,6 +43,12 @@ test('automatic mode falls back for proxy/backend protocol failures', () => {
     assert.equal(compatibilityFallbackVersion('1.21.4', '1.21.4', 'Outdated client!'), null);
     assert.equal(compatibilityFallbackVersion('auto', '26.1', 'Internal server connection error'), null);
     assert.equal(compatibilityFallbackVersion('auto', '26.1', 'You are banned'), null);
+});
+
+test('known-good FatalMC protocol is used without affecting other servers', () => {
+    assert.equal(resolvedMinecraftVersion('auto', null, 'play.fatalmc.org'), '1.21.1');
+    assert.equal(resolvedMinecraftVersion('1.21.4', null, 'play.fatalmc.org'), '1.21.4');
+    assert.equal(resolvedMinecraftVersion('auto', null, 'play.potionmc.net'), null);
 });
 
 test('common cracked-server register and login prompts are recognized safely', () => {

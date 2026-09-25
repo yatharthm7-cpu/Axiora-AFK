@@ -47,6 +47,18 @@ function versionPreference(value) {
     return normalizeMinecraftVersion(value) || 'auto';
 }
 
+function defaultVersionForHost(host) {
+    // FatalMC's proxy can advertise a newer protocol than its Lifesteal
+    // backend accepts.  The supplied known-good bot used 1.21.1 here.
+    return /(^|\.)fatalmc\.(?:org|net)$/i.test(String(host || '')) ? '1.21.1' : null;
+}
+
+function resolvedMinecraftVersion(value, fallback, host) {
+    return normalizeMinecraftVersion(value) ||
+        normalizeMinecraftVersion(fallback) ||
+        defaultVersionForHost(host);
+}
+
 function compatibilityFallbackVersion(requestedVersion, activeVersion, reason) {
     // A manually selected version is authoritative. Automatic mode can fall
     // back when a modern proxy accepts the connection but its game backend
@@ -109,6 +121,7 @@ function validateAccountName(value, authType) {
 
 module.exports = {
     compatibilityFallbackVersion,
+    defaultVersionForHost,
     defaultJoinCommandForHost,
     detectCrackedAuthAction,
     isCrackedAuthSuccess,
@@ -117,6 +130,7 @@ module.exports = {
     optionalValue,
     parseAddress,
     resolvedJoinCommand,
+    resolvedMinecraftVersion,
     validateAccountName,
     versionPreference
 };

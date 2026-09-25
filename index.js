@@ -14,6 +14,7 @@ const {
     normalizeMinecraftVersion,
     parseAddress,
     resolvedJoinCommand,
+    resolvedMinecraftVersion,
     validateAccountName,
     versionPreference
 } = require('./connection-utils');
@@ -712,7 +713,11 @@ function spawnDynamicBot(channelId) {
 
     const { host, port } = parseAddress(session.server_ip);
     const requestedVersion = normalizeMinecraftVersion(session.version);
-    const activeVersion = requestedVersion || normalizeMinecraftVersion(session.autoVersionFallback);
+    const activeVersion = resolvedMinecraftVersion(
+        session.version,
+        session.autoVersionFallback,
+        host
+    );
     const joinCommand = resolvedJoinCommand(session.joinCommand, host);
 
     // Prepare createBot options
