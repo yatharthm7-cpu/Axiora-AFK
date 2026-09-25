@@ -562,23 +562,28 @@ function reportBoneDropProblem(session, error) {
     session.discordChannel.send(`🦴 Bone Drop paused for this cycle: \`${errorMessage}\``).catch(() => {});
 }
 
+async function triggerBoneDropCycle(bot, session) {
+    if (session.stopped || session.bot !== bot || bot.boneDropBusy) return;
+    try {
+        const result = await runBoneDropCycle(bot);
+        recordBoneDropResult(session, result);
+        session.lastBoneDropError = null;
+        if (result.soldAll) {
+            session.discordChannel.send(`🏹 Arrows detected after **${result.dropActions}** Drop Loot click(s). Clicked **Sell All** once.`).catch(() => {});
+        }
+    } catch (error) {
+        reportBoneDropProblem(session, error);
+    }
+}
+
 function startBoneDropMacro(bot, session) {
     if (bot.boneDropInterval) clearInterval(bot.boneDropInterval);
     session.boneDropEnabled = true;
     session.boneDropIntervalSeconds = normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds);
-    bot.boneDropInterval = setInterval(async () => {
-        if (session.stopped || session.bot !== bot) return;
-        try {
-            const result = await runBoneDropCycle(bot);
-            recordBoneDropResult(session, result);
-            session.lastBoneDropError = null;
-            if (result.soldAll) {
-                session.discordChannel.send(`🏹 Arrows detected after **${result.dropActions}** Drop Loot click(s). Clicked **Sell All** once.`).catch(() => {});
-            }
-        } catch (error) {
-            reportBoneDropProblem(session, error);
-        }
-    }, session.boneDropIntervalSeconds * 1000);
+    bot.boneDropInterval = setInterval(
+        () => triggerBoneDropCycle(bot, session),
+        session.boneDropIntervalSeconds * 1000
+    );
 }
 
 function reconnectDelayMs(session) {
@@ -1285,7 +1290,8 @@ discordClient.on('messageCreate', async (message) => {
 
             startBoneDropMacro(activeBot, currentSession);
             saveSessions();
-            return message.reply(`🦴 **Bone Drop enabled.** Cooldown: **${currentSession.boneDropIntervalSeconds} seconds**. It repeats Drop Loot until bones are gone and clicks Sell All once if arrows appear.`).catch(() => {});
+            void triggerBoneDropCycle(activeBot, currentSession);
+            return message.reply(`🦴 **Bone Drop enabled.** Starting a cycle now, then repeating every **${currentSession.boneDropIntervalSeconds} seconds**. It repeats Drop Loot until bones are gone and clicks Sell All once if arrows appear.`).catch(() => {});
         }
 
         if (content.toLowerCase() === '!bonedrop off') {
@@ -1659,7 +1665,8 @@ async function runDashboardAction(id, payload) {
         session.boneDropIntervalSeconds = normalizeBoneDropIntervalSeconds(payload.seconds || session.boneDropIntervalSeconds);
         startBoneDropMacro(bot, session);
         saveSessions();
-        return { message: `Bone Drop enabled every ${session.boneDropIntervalSeconds} seconds.` };
+        void triggerBoneDropCycle(bot, session);
+        return { message: `Bone Drop started now, then repeats every ${session.boneDropIntervalSeconds} seconds.` };
     }
     if (action === 'bonedrop-off') {
         session.boneDropEnabled = false;
