@@ -130,25 +130,48 @@ async function closeCurrentWindow(bot) {
 async function openSkeletonOverview(bot) {
     if (menuTitle(bot.currentWindow).toLowerCase().includes('skeleton spawner')) return bot.currentWindow;
     await closeCurrentWindow(bot);
-    const positions = bot.findBlocks({
-        matching: block => block && ['spawner', 'monster_spawner'].includes(block.name),
-        maxDistance: 6,
-        count: 64
-    });
-    if (!positions.length) throw new Error('No spawner is within 6 blocks of the bot.');
+
+    const candidates = [];
+    const candidateKeys = new Set();
+    const addCandidate = block => {
+        if (!block?.position) return;
+        const key = `${block.position.x}:${block.position.y}:${block.position.z}`;
+        if (candidateKeys.has(key)) return;
+        candidateKeys.add(key);
+        candidates.push(block);
+    };
+
+    // Custom-spawner servers may disguise the clickable block, so first try
+    // exactly what the account is looking at.
+    try { addCandidate(bot.blockAtCursor(8)); } catch (error) {}
+
+    let positions = [];
+    try {
+        positions = bot.findBlocks({
+            matching: block => block && String(block.name || '').includes('spawner'),
+            maxDistance: 8,
+            count: 64
+        });
+    } catch (error) {}
     positions.sort((left, right) => bot.entity.position.distanceSquared(left) - bot.entity.position.distanceSquared(right));
-    for (const position of positions) {
-        const spawner = bot.blockAt(position);
-        if (!spawner) continue;
+    for (const position of positions) addCandidate(bot.blockAt(position));
+
+    if (!candidates.length) {
+        throw new Error('No block is visible in front of the bot and no spawner block is loaded within 8 blocks. Face the spawner and try !bonedrop now.');
+    }
+
+    for (const spawner of candidates) {
         try {
             await closeCurrentWindow(bot);
+            await bot.lookAt(spawner.position.offset(0.5, 0.5, 0.5), true);
             await bot.activateBlock(spawner);
             const window = await waitUntil(() => bot.currentWindow, 2500);
             if (window && menuTitle(window).toLowerCase().includes('skeleton spawner')) return window;
         } catch (error) {}
     }
     await closeCurrentWindow(bot);
-    throw new Error('No reachable Skeleton spawner menu was found.');
+    const checked = [...new Set(candidates.map(block => block.name || 'unknown'))].join(', ');
+    throw new Error(`No Skeleton spawner menu opened. Checked: ${checked}. Face the clickable spawner block and try !bonedrop now.`);
 }
 
 async function openSkeletonLootMenu(bot) {
