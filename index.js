@@ -357,7 +357,6 @@ function spawnDynamicBot(channelId) {
         port: port,
         username: session.username,
         auth: session.authType,
-        version: '1.21.1',
         hideErrors: true,
         viewDistance: 2
     };
@@ -422,7 +421,7 @@ function spawnDynamicBot(channelId) {
 
     bot.on('spawn', () => {
         const botName = bot.username;
-        session.discordChannel.send(`✅ **${botName}** spawned! *(Waiting 10 seconds to route...)*`).catch(() => {});
+        session.discordChannel.send(`✅ **${botName}** spawned using Minecraft **${bot.version || 'auto'}**! *(Waiting 10 seconds to route...)*`).catch(() => {});
 
         if (bot.afkInterval) clearInterval(bot.afkInterval);
 
