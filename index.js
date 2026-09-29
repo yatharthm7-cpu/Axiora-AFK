@@ -127,6 +127,15 @@ async function closeCurrentWindow(bot) {
     await waitUntil(() => !bot.currentWindow, 1000, 50);
 }
 
+function interactionFaceTowardPlayer(block, playerPosition) {
+    const dx = playerPosition.x - (block.position.x + 0.5);
+    const dz = playerPosition.z - (block.position.z + 0.5);
+    if (Math.abs(dx) >= Math.abs(dz)) {
+        return block.position.offset(dx >= 0 ? 1 : -1, 0, 0).minus(block.position);
+    }
+    return block.position.offset(0, 0, dz >= 0 ? 1 : -1).minus(block.position);
+}
+
 async function openSkeletonOverview(bot) {
     if (menuTitle(bot.currentWindow).toLowerCase().includes('skeleton spawner')) return bot.currentWindow;
     await closeCurrentWindow(bot);
@@ -164,8 +173,17 @@ async function openSkeletonOverview(bot) {
         try {
             await closeCurrentWindow(bot);
             await bot.lookAt(spawner.position.offset(0.5, 0.5, 0.5), true);
-            await bot.activateBlock(spawner);
-            const window = await waitUntil(() => bot.currentWindow, 2500);
+            await new Promise(resolve => setTimeout(resolve, 250));
+            const face = interactionFaceTowardPlayer(spawner, bot.entity.position);
+            await bot.activateBlock(spawner, face);
+            let window = await waitUntil(() => bot.currentWindow, 2500);
+            if (!window) {
+                // Some custom-spawner plugins miss the first interaction while
+                // the server is still applying the bot's look direction.
+                await new Promise(resolve => setTimeout(resolve, 350));
+                await bot.activateBlock(spawner, face);
+                window = await waitUntil(() => bot.currentWindow, 2500);
+            }
             if (window && menuTitle(window).toLowerCase().includes('skeleton spawner')) return window;
         } catch (error) {}
     }
