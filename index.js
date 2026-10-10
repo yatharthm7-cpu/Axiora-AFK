@@ -15,7 +15,6 @@ const discordClient = new Client({
 
 // Key = Discord Channel ID, Value = Session Object
 const botSessions = new Map(); 
-const reconnectInterval = 5000;
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const CENTRAL_LOG_CHANNEL = '1535252592198680607';
 const DEFAULT_BONE_DROP_INTERVAL_SECONDS = 60;
@@ -434,6 +433,7 @@ function spawnDynamicBot(channelId) {
     bot.autoEatInterval = null; 
     bot.boneDropInterval = null;
     bot.boneDropBusy = false;
+    bot.lastDisconnectCause = null;
 
     // --- Minecraft Events ---
 
@@ -555,27 +555,22 @@ function spawnDynamicBot(channelId) {
         if (session.proxy_host && (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT')) {
             errDesc += ' (Possible proxy issue)';
         }
+        bot.lastDisconnectCause = `Network/client error: ${errDesc}`;
         const msg = `🚨 **${botName}** encountered an error: \`${errDesc}\``;
         session.discordChannel.send(msg).catch(() => {});
         logToCentral(msg);
     });
 
     bot.on('kicked', async (reason) => {
-        let parsedReason = String(reason);
-        if (typeof reason === 'object') {
-            try {
-                if (reason.value && reason.value.text && reason.value.text.value) {
-                    parsedReason = reason.value.text.value;
-                } else {
-                    parsedReason = JSON.stringify(reason, null, 2);
-                }
-            } catch (e) {
-                parsedReason = "Unknown Object";
-            }
+        let parsedReason = extractMinecraftText(reason).replace(/\s+/g, ' ').trim();
+        if (!parsedReason) {
+            try { parsedReason = typeof reason === 'string' ? reason : JSON.stringify(reason); }
+            catch (error) { parsedReason = String(reason || 'Unknown kick reason'); }
         }
+        bot.lastDisconnectCause = `Server kick: ${parsedReason}`;
 
         const botName = bot.username || session.username;
-        const logMsg = `⚠️ **${botName}** kicked from ${host}:\n\`\`\`json\n${parsedReason}\n\`\`\``;
+        const logMsg = `⚠️ **${botName}** kicked from ${host}:\n\`\`\`\n${parsedReason.replace(/```/g, "'''")}\n\`\`\``;
 
         logToCentral(logMsg);
         const kickMessage = await session.discordChannel.send(logMsg).catch(() => {});
@@ -585,8 +580,11 @@ function spawnDynamicBot(channelId) {
 
     bot.on('end', (reason) => {
         const botName = session.username;
-        const endReason = String(reason || 'socket closed').replace(/\s+/g, ' ').slice(0, 300);
-        session.discordChannel.send(`🔌 **${botName}** disconnected: \`${endReason}\``).catch(() => {});
+        const endReason = String(reason || 'socket closed').replace(/\s+/g, ' ').trim();
+        const exactReason = bot.lastDisconnectCause && !bot.lastDisconnectCause.includes(endReason)
+            ? `${endReason} | ${bot.lastDisconnectCause}`
+            : (bot.lastDisconnectCause || endReason);
+        session.discordChannel.send(`🔌 **${botName}** disconnected. Exact reason:\n\`\`\`\n${exactReason.replace(/```/g, "'''")}\n\`\`\``).catch(() => {});
         
         // --- Aggressive Memory Leak Cleanup ---
         if (bot.afkInterval) clearInterval(bot.afkInterval);
@@ -596,13 +594,11 @@ function spawnDynamicBot(channelId) {
         if (bot.boneDropInterval) clearInterval(bot.boneDropInterval);
         
         // Completely sever the connection between the session and the dead bot
-        session.bot = null; 
+        session.bot = null;
+        session.reconnectTimer = null;
 
         if (!session.stopped) {
-            session.discordChannel.send(`🔄 **${botName}** reconnecting in ${reconnectInterval / 1000}s...`).catch(() => {});
-            session.reconnectTimer = setTimeout(() => {
-                spawnDynamicBot(channelId);
-            }, reconnectInterval);
+            session.discordChannel.send(`⏸️ **${botName}** will stay offline to avoid repeated reconnects. Use \`!reconnect\` in this channel when it is safe.`).catch(() => {});
         }
     });
 }
@@ -800,6 +796,21 @@ discordClient.on('messageCreate', async (message) => {
             message.reply("This channel is not linked to an active bot.").catch(() => {});
         }
         return;
+    }
+
+    if (content.toLowerCase() === '!reconnect') {
+        const session = botSessions.get(message.channel.id);
+        if (!session) {
+            return message.reply('This channel is not linked to a saved bot.').catch(() => {});
+        }
+        if (session.bot) {
+            return message.reply(`⚠️ **${session.username}** is already connected or connecting.`).catch(() => {});
+        }
+
+        session.stopped = false;
+        session.reconnectTimer = null;
+        spawnDynamicBot(message.channel.id);
+        return message.reply(`🔄 Manually reconnecting **${session.username}**...`).catch(() => {});
     }
 
     const currentSession = botSessions.get(message.channel.id);
