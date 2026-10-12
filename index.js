@@ -20,6 +20,8 @@ const CENTRAL_LOG_CHANNEL = '1535252592198680607';
 const DEFAULT_BONE_DROP_INTERVAL_SECONDS = 60;
 const MIN_BONE_DROP_INTERVAL_SECONDS = 5;
 const MAX_BONE_DROP_INTERVAL_SECONDS = 86400;
+const SPAWNER_DISCOVERY_ATTEMPTS = 4;
+const SPAWNER_DISCOVERY_RETRY_DELAY_MS = 750;
 
 function normalizeBoneDropIntervalSeconds(value) {
     if (value == null || value === '') return DEFAULT_BONE_DROP_INTERVAL_SECONDS;
@@ -137,58 +139,74 @@ function interactionFaceTowardPlayer(block, playerPosition) {
 
 async function openSkeletonOverview(bot) {
     if (menuTitle(bot.currentWindow).toLowerCase().includes('skeleton spawner')) return bot.currentWindow;
-    await closeCurrentWindow(bot);
+    const checkedBlocks = new Set();
 
-    const candidates = [];
-    const candidateKeys = new Set();
-    const addCandidate = block => {
-        if (!block?.position) return;
-        const key = `${block.position.x}:${block.position.y}:${block.position.z}`;
-        if (candidateKeys.has(key)) return;
-        candidateKeys.add(key);
-        candidates.push(block);
-    };
+    for (let attempt = 1; attempt <= SPAWNER_DISCOVERY_ATTEMPTS; attempt++) {
+        await closeCurrentWindow(bot);
 
-    // Custom-spawner servers may disguise the clickable block, so first try
-    // exactly what the account is looking at.
-    try { addCandidate(bot.blockAtCursor(8)); } catch (error) {}
+        const candidates = [];
+        const candidateKeys = new Set();
+        const addCandidate = block => {
+            if (!block?.position) return;
+            const key = `${block.position.x}:${block.position.y}:${block.position.z}`;
+            if (candidateKeys.has(key)) return;
+            candidateKeys.add(key);
+            checkedBlocks.add(block.name || 'unknown');
+            candidates.push(block);
+        };
 
-    let positions = [];
-    try {
-        positions = bot.findBlocks({
-            matching: block => block && String(block.name || '').includes('spawner'),
-            maxDistance: 8,
-            count: 64
-        });
-    } catch (error) {}
-    positions.sort((left, right) => bot.entity.position.distanceSquared(left) - bot.entity.position.distanceSquared(right));
-    for (const position of positions) addCandidate(bot.blockAt(position));
+        // Reuse the last spawner that successfully opened before depending on
+        // the bot's current head direction or a fresh chunk scan.
+        if (bot.lastSpawnerPosition) {
+            try { addCandidate(bot.blockAt(bot.lastSpawnerPosition)); } catch (error) {}
+        }
 
-    if (!candidates.length) {
-        throw new Error('No block is visible in front of the bot and no spawner block is loaded within 8 blocks. Face the spawner and try !bonedrop now.');
-    }
+        // Custom-spawner servers may disguise the clickable block, so also try
+        // exactly what the account is looking at.
+        try { addCandidate(bot.blockAtCursor(8)); } catch (error) {}
 
-    for (const spawner of candidates) {
+        let positions = [];
         try {
-            await closeCurrentWindow(bot);
-            await bot.lookAt(spawner.position.offset(0.5, 0.5, 0.5), true);
-            await new Promise(resolve => setTimeout(resolve, 250));
-            const face = interactionFaceTowardPlayer(spawner, bot.entity.position);
-            await bot.activateBlock(spawner, face);
-            let window = await waitUntil(() => bot.currentWindow, 2500);
-            if (!window) {
-                // Some custom-spawner plugins miss the first interaction while
-                // the server is still applying the bot's look direction.
-                await new Promise(resolve => setTimeout(resolve, 350));
-                await bot.activateBlock(spawner, face);
-                window = await waitUntil(() => bot.currentWindow, 2500);
-            }
-            if (window && menuTitle(window).toLowerCase().includes('skeleton spawner')) return window;
+            positions = bot.findBlocks({
+                matching: block => block && String(block.name || '').includes('spawner'),
+                maxDistance: 8,
+                count: 64
+            });
         } catch (error) {}
+        positions.sort((left, right) => bot.entity.position.distanceSquared(left) - bot.entity.position.distanceSquared(right));
+        for (const position of positions) addCandidate(bot.blockAt(position));
+
+        for (const spawner of candidates) {
+            try {
+                await closeCurrentWindow(bot);
+                await bot.lookAt(spawner.position.offset(0.5, 0.5, 0.5), true);
+                await new Promise(resolve => setTimeout(resolve, 250));
+                const face = interactionFaceTowardPlayer(spawner, bot.entity.position);
+                await bot.activateBlock(spawner, face);
+                let window = await waitUntil(() => bot.currentWindow, 2500);
+                if (!window) {
+                    // Some custom-spawner plugins miss the first interaction while
+                    // the server is still applying the bot's look direction.
+                    await new Promise(resolve => setTimeout(resolve, 350));
+                    await bot.lookAt(spawner.position.offset(0.5, 0.5, 0.5), true);
+                    await bot.activateBlock(spawner, face);
+                    window = await waitUntil(() => bot.currentWindow, 2500);
+                }
+                if (window && menuTitle(window).toLowerCase().includes('skeleton spawner')) {
+                    bot.lastSpawnerPosition = spawner.position.clone();
+                    return window;
+                }
+            } catch (error) {}
+        }
+
+        if (attempt < SPAWNER_DISCOVERY_ATTEMPTS) {
+            await new Promise(resolve => setTimeout(resolve, SPAWNER_DISCOVERY_RETRY_DELAY_MS));
+        }
     }
+
     await closeCurrentWindow(bot);
-    const checked = [...new Set(candidates.map(block => block.name || 'unknown'))].join(', ');
-    throw new Error(`No Skeleton spawner menu opened. Checked: ${checked}. Face the clickable spawner block and try !bonedrop now.`);
+    const checked = [...checkedBlocks].join(', ') || 'no loaded block';
+    throw new Error(`No Skeleton spawner menu opened after ${SPAWNER_DISCOVERY_ATTEMPTS} attempts. Checked: ${checked}. Keep the bot facing the clickable spawner block.`);
 }
 
 async function openSkeletonLootMenu(bot) {
@@ -259,15 +277,28 @@ async function triggerBoneDropCycle(bot, session) {
         const result = await runBoneDropCycle(bot);
         session.discordChannel.send(`🏹 Bone Drop finished after **${result.dropActions}** Drop Loot click(s). Clicked **Sell All** once.`).catch(() => {});
     } catch (error) {
-        session.discordChannel.send(`❌ Bone Drop failed: \`${error.message}\``).catch(() => {});
+        const retryNotice = session.boneDropEnabled
+            ? ` Automatic mode is still enabled and will try again in **${session.boneDropIntervalSeconds} seconds**.`
+            : '';
+        session.discordChannel.send(`❌ Bone Drop attempt failed: \`${error.message}\`${retryNotice}`).catch(() => {});
     }
 }
 
+function scheduleNextBoneDrop(bot, session) {
+    if (!session.boneDropEnabled || session.stopped || session.bot !== bot) return;
+    const delayMs = normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds) * 1000;
+    bot.boneDropInterval = setTimeout(async () => {
+        bot.boneDropInterval = null;
+        await triggerBoneDropCycle(bot, session);
+        scheduleNextBoneDrop(bot, session);
+    }, delayMs);
+}
+
 function startBoneDropMacro(bot, session) {
-    if (bot.boneDropInterval) clearInterval(bot.boneDropInterval);
+    if (bot.boneDropInterval) clearTimeout(bot.boneDropInterval);
     session.boneDropEnabled = true;
     session.boneDropIntervalSeconds = normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds);
-    bot.boneDropInterval = setInterval(() => triggerBoneDropCycle(bot, session), session.boneDropIntervalSeconds * 1000);
+    scheduleNextBoneDrop(bot, session);
 }
 
 // ==========================================
@@ -433,6 +464,7 @@ function spawnDynamicBot(channelId) {
     bot.autoEatInterval = null; 
     bot.boneDropInterval = null;
     bot.boneDropBusy = false;
+    bot.lastSpawnerPosition = null;
     bot.lastDisconnectCause = null;
 
     // --- Minecraft Events ---
@@ -468,6 +500,7 @@ function spawnDynamicBot(channelId) {
             if (session.stopped || session.bot !== bot) return;
 
             bot.afkInterval = setInterval(() => {
+                if (bot.boneDropBusy) return;
                 if (bot && bot.entity && bot.isAlive) { 
                     if (typeof bot.entity.yaw === 'number' && typeof bot.entity.pitch === 'number') {
                         const yaw = bot.entity.yaw + (Math.random() - 0.5);
@@ -591,7 +624,7 @@ function spawnDynamicBot(channelId) {
         if (bot.lifestealTimer) clearTimeout(bot.lifestealTimer);
         if (bot.sellInterval) clearInterval(bot.sellInterval);
         if (bot.autoEatInterval) clearInterval(bot.autoEatInterval); 
-        if (bot.boneDropInterval) clearInterval(bot.boneDropInterval);
+        if (bot.boneDropInterval) clearTimeout(bot.boneDropInterval);
         
         // Completely sever the connection between the session and the dead bot
         session.bot = null;
@@ -762,7 +795,7 @@ discordClient.on('messageCreate', async (message) => {
             if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
             if (session.bot && session.bot.sellInterval) clearInterval(session.bot.sellInterval);
             if (session.bot && session.bot.autoEatInterval) clearInterval(session.bot.autoEatInterval); 
-            if (session.bot && session.bot.boneDropInterval) clearInterval(session.bot.boneDropInterval);
+            if (session.bot && session.bot.boneDropInterval) clearTimeout(session.bot.boneDropInterval);
             
             if (session.bot) session.bot.quit();
             session.bot = null; // Prevent leaks
@@ -782,7 +815,7 @@ discordClient.on('messageCreate', async (message) => {
             if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
             if (session.bot && session.bot.sellInterval) clearInterval(session.bot.sellInterval);
             if (session.bot && session.bot.autoEatInterval) clearInterval(session.bot.autoEatInterval); 
-            if (session.bot && session.bot.boneDropInterval) clearInterval(session.bot.boneDropInterval);
+            if (session.bot && session.bot.boneDropInterval) clearTimeout(session.bot.boneDropInterval);
             
             if (session.bot) session.bot.quit();
             session.bot = null; // Prevent leaks
@@ -834,7 +867,7 @@ discordClient.on('messageCreate', async (message) => {
 
         if (content.toLowerCase() === '!bonedrop off') {
             currentSession.boneDropEnabled = false;
-            if (activeBot.boneDropInterval) clearInterval(activeBot.boneDropInterval);
+            if (activeBot.boneDropInterval) clearTimeout(activeBot.boneDropInterval);
             activeBot.boneDropInterval = null;
             saveSessions();
             return message.reply('🛑 Bone Drop disabled.').catch(() => {});
@@ -853,7 +886,7 @@ discordClient.on('messageCreate', async (message) => {
         }
 
         if (content.toLowerCase() === '!bonedrop status') {
-            const state = currentSession.boneDropEnabled && activeBot.boneDropInterval ? 'enabled' : 'disabled';
+            const state = currentSession.boneDropEnabled ? 'enabled' : 'disabled';
             return message.reply(`🦴 Bone Drop is **${state}** with a **${normalizeBoneDropIntervalSeconds(currentSession.boneDropIntervalSeconds)}-second** interval.`).catch(() => {});
         }
 
