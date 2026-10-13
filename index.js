@@ -272,33 +272,59 @@ async function runBoneDropCycle(bot) {
 }
 
 async function triggerBoneDropCycle(bot, session) {
-    if (session.stopped || session.bot !== bot || bot.boneDropBusy) return;
+    if (session.stopped || session.bot !== bot || bot.boneDropBusy) return null;
     try {
         const result = await runBoneDropCycle(bot);
         session.discordChannel.send(`🏹 Bone Drop finished after **${result.dropActions}** Drop Loot click(s). Clicked **Sell All** once.`).catch(() => {});
+        return true;
     } catch (error) {
         const retryNotice = session.boneDropEnabled
-            ? ` Automatic mode is still enabled and will try again in **${session.boneDropIntervalSeconds} seconds**.`
+            ? ' Automatic mode is still enabled and will retry sooner before returning to the normal interval.'
             : '';
         session.discordChannel.send(`❌ Bone Drop attempt failed: \`${error.message}\`${retryNotice}`).catch(() => {});
+        return false;
     }
 }
 
-function scheduleNextBoneDrop(bot, session) {
-    if (!session.boneDropEnabled || session.stopped || session.bot !== bot) return;
-    const delayMs = normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds) * 1000;
+function scheduleNextBoneDrop(bot, session, delaySeconds = session.boneDropIntervalSeconds, generation = bot.boneDropScheduleGeneration) {
+    if (!session.boneDropEnabled || session.stopped || session.bot !== bot || generation !== bot.boneDropScheduleGeneration) return;
+    const delayMs = normalizeBoneDropIntervalSeconds(delaySeconds) * 1000;
     bot.boneDropInterval = setTimeout(async () => {
         bot.boneDropInterval = null;
-        await triggerBoneDropCycle(bot, session);
-        scheduleNextBoneDrop(bot, session);
+        const succeeded = await triggerBoneDropCycle(bot, session);
+        if (generation !== bot.boneDropScheduleGeneration) return;
+        const normalDelay = normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds);
+        const nextDelay = succeeded === false ? Math.min(20, normalDelay) : normalDelay;
+        if (succeeded === false && session.boneDropEnabled && !session.stopped && session.bot === bot) {
+            session.discordChannel.send(`🔄 Bone Drop will automatically retry in **${nextDelay} seconds**.`).catch(() => {});
+        }
+        scheduleNextBoneDrop(bot, session, nextDelay, generation);
     }, delayMs);
 }
 
-function startBoneDropMacro(bot, session) {
+function startBoneDropMacro(bot, session, runImmediately = false) {
     if (bot.boneDropInterval) clearTimeout(bot.boneDropInterval);
+    bot.boneDropScheduleGeneration = (bot.boneDropScheduleGeneration || 0) + 1;
+    const generation = bot.boneDropScheduleGeneration;
     session.boneDropEnabled = true;
     session.boneDropIntervalSeconds = normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds);
-    scheduleNextBoneDrop(bot, session);
+    bot.boneDropInterval = null;
+
+    if (!runImmediately) {
+        scheduleNextBoneDrop(bot, session, session.boneDropIntervalSeconds, generation);
+        return;
+    }
+
+    void (async () => {
+        const succeeded = await triggerBoneDropCycle(bot, session);
+        if (generation !== bot.boneDropScheduleGeneration) return;
+        const normalDelay = normalizeBoneDropIntervalSeconds(session.boneDropIntervalSeconds);
+        const nextDelay = succeeded === false ? Math.min(20, normalDelay) : normalDelay;
+        if (succeeded === false && session.boneDropEnabled && !session.stopped && session.bot === bot) {
+            session.discordChannel.send(`🔄 Bone Drop will automatically retry in **${nextDelay} seconds**.`).catch(() => {});
+        }
+        scheduleNextBoneDrop(bot, session, nextDelay, generation);
+    })();
 }
 
 // ==========================================
@@ -464,6 +490,7 @@ function spawnDynamicBot(channelId) {
     bot.autoEatInterval = null; 
     bot.boneDropInterval = null;
     bot.boneDropBusy = false;
+    bot.boneDropScheduleGeneration = 0;
     bot.lastSpawnerPosition = null;
     bot.lastDisconnectCause = null;
 
@@ -856,9 +883,8 @@ discordClient.on('messageCreate', async (message) => {
                 currentSession.boneDropIntervalSeconds = normalizeBoneDropIntervalSeconds(
                     boneDropOnMatch[1] || currentSession.boneDropIntervalSeconds
                 );
-                startBoneDropMacro(activeBot, currentSession);
+                startBoneDropMacro(activeBot, currentSession, true);
                 saveSessions();
-                void triggerBoneDropCycle(activeBot, currentSession);
                 return message.reply(`🦴 Bone Drop started now and will repeat every **${currentSession.boneDropIntervalSeconds} seconds**.`).catch(() => {});
             } catch (error) {
                 return message.reply(`❌ ${error.message}`).catch(() => {});
@@ -867,6 +893,7 @@ discordClient.on('messageCreate', async (message) => {
 
         if (content.toLowerCase() === '!bonedrop off') {
             currentSession.boneDropEnabled = false;
+            activeBot.boneDropScheduleGeneration = (activeBot.boneDropScheduleGeneration || 0) + 1;
             if (activeBot.boneDropInterval) clearTimeout(activeBot.boneDropInterval);
             activeBot.boneDropInterval = null;
             saveSessions();
