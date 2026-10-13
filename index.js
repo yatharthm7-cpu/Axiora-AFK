@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { SocksClient } = require('socks'); // Import SocksClient
 const mineflayer = require('mineflayer');
-const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, Options } = require('discord.js');
 
 const discordClient = new Client({
     intents: [
@@ -11,6 +11,19 @@ const discordClient = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
     ],
+    makeCache: Options.cacheWithLimits({
+        ...Options.DefaultMakeCacheSettings,
+        MessageManager: 10,
+        ReactionManager: 0,
+        ReactionUserManager: 0,
+    }),
+    sweepers: {
+        ...Options.DefaultSweeperSettings,
+        messages: {
+            interval: 300,
+            lifetime: 300,
+        },
+    },
 });
 
 // Key = Discord Channel ID, Value = Session Object
@@ -22,6 +35,9 @@ const MIN_BONE_DROP_INTERVAL_SECONDS = 5;
 const MAX_BONE_DROP_INTERVAL_SECONDS = 86400;
 const SPAWNER_DISCOVERY_ATTEMPTS = 4;
 const SPAWNER_DISCOVERY_RETRY_DELAY_MS = 750;
+const MINECRAFT_CHAT_FLUSH_MS = 1000;
+const MAX_MINECRAFT_CHAT_BUFFER_LINES = 100;
+const MAX_DISCORD_CHAT_MESSAGE_LENGTH = 1900;
 
 function normalizeBoneDropIntervalSeconds(value) {
     if (value == null || value === '') return DEFAULT_BONE_DROP_INTERVAL_SECONDS;
@@ -30,6 +46,48 @@ function normalizeBoneDropIntervalSeconds(value) {
         throw new Error(`Bone Drop cooldown must be ${MIN_BONE_DROP_INTERVAL_SECONDS}-${MAX_BONE_DROP_INTERVAL_SECONDS} seconds.`);
     }
     return seconds;
+}
+
+function scheduleMinecraftChatFlush(bot, session) {
+    if (bot.chatFlushTimer || !bot.chatLogBuffer?.length) return;
+
+    bot.chatFlushTimer = setTimeout(async () => {
+        bot.chatFlushTimer = null;
+        if (session.stopped || session.bot !== bot) {
+            bot.chatLogBuffer.length = 0;
+            bot.chatDroppedLines = 0;
+            return;
+        }
+
+        let payload = '';
+        if (bot.chatDroppedLines > 0) {
+            payload = `⚠️ ${bot.chatDroppedLines} older chat line(s) omitted to control memory usage.`;
+            bot.chatDroppedLines = 0;
+        }
+
+        while (bot.chatLogBuffer.length > 0) {
+            const line = `💬 ${bot.chatLogBuffer[0]}`.slice(0, MAX_DISCORD_CHAT_MESSAGE_LENGTH);
+            const candidate = payload ? `${payload}\n${line}` : line;
+            if (candidate.length > MAX_DISCORD_CHAT_MESSAGE_LENGTH) break;
+            bot.chatLogBuffer.shift();
+            payload = candidate;
+        }
+
+        if (payload) await session.discordChannel.send(payload).catch(() => {});
+        if (bot.chatLogBuffer.length > 0) scheduleMinecraftChatFlush(bot, session);
+    }, MINECRAFT_CHAT_FLUSH_MS);
+    bot.chatFlushTimer.unref?.();
+}
+
+function queueMinecraftChat(bot, session, message) {
+    const line = String(message || '').replace(/\s+/g, ' ').trim();
+    if (!line) return;
+    if (bot.chatLogBuffer.length >= MAX_MINECRAFT_CHAT_BUFFER_LINES) {
+        bot.chatLogBuffer.shift();
+        bot.chatDroppedLines++;
+    }
+    bot.chatLogBuffer.push(line);
+    scheduleMinecraftChatFlush(bot, session);
 }
 
 function extractMinecraftText(value, seen = new Set()) {
@@ -493,6 +551,9 @@ function spawnDynamicBot(channelId) {
     bot.boneDropScheduleGeneration = 0;
     bot.lastSpawnerPosition = null;
     bot.lastDisconnectCause = null;
+    bot.chatLogBuffer = [];
+    bot.chatDroppedLines = 0;
+    bot.chatFlushTimer = null;
 
     // --- Minecraft Events ---
 
@@ -554,7 +615,7 @@ function spawnDynamicBot(channelId) {
         if (position === 'game_info') return;
 
         const lowerMsg = message.toLowerCase();
-        session.discordChannel.send(`💬 ${message}`).catch(() => {});
+        queueMinecraftChat(bot, session, message);
 
         // Authentication Logic
         if (bot.customPassword && !bot.isAuthenticated && !bot.authSent) {
@@ -652,6 +713,9 @@ function spawnDynamicBot(channelId) {
         if (bot.sellInterval) clearInterval(bot.sellInterval);
         if (bot.autoEatInterval) clearInterval(bot.autoEatInterval); 
         if (bot.boneDropInterval) clearTimeout(bot.boneDropInterval);
+        if (bot.chatFlushTimer) clearTimeout(bot.chatFlushTimer);
+        bot.chatLogBuffer.length = 0;
+        bot.chatDroppedLines = 0;
         
         // Completely sever the connection between the session and the dead bot
         session.bot = null;
